@@ -160,15 +160,16 @@ static void shell_puts(const char *s)
 	early_serial_puts(s);
 }
 
+static int serial_data_ready(void)
+{
+	return inb(SERIAL_PORT + 5) & 0x01;
+}
+
 static int shell_getc(void)
 {
-	unsigned char lsr;
 	/* Read from serial port - poll for data ready */
-	while (1) {
-		lsr = inb(SERIAL_PORT + 5);
-		if (lsr & 0x01)  /* Data ready */
-			break;
-	}
+	while (!serial_data_ready())
+		;
 	return inb(SERIAL_PORT);
 }
 
@@ -303,9 +304,19 @@ static void process_command(void)
 	}
 }
 
+static void flush_input(void)
+{
+	/* Flush any pending characters in the serial receive buffer */
+	while (inb(SERIAL_PORT + 5) & 0x01)
+		(void)inb(SERIAL_PORT);
+}
+
 static void builtin_shell(void)
 {
 	int c;
+	
+	/* Clear any garbage from boot process */
+	flush_input();
 	
 	shell_puts("\n");
 	shell_puts("====================================\n");
