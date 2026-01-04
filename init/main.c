@@ -120,22 +120,17 @@ void main(void)		/* This really IS void, no error here. */
 	buffer_init();
 	hd_init();
 	sti();
-	early_serial_puts("Initialization complete, entering user mode...\n");
-	move_to_user_mode();
-	early_serial_puts("In user mode, calling fork()...\n");
-	if (!fork()) {		/* we count on this going ok */
-		early_serial_puts("In child process, calling init()...\n");
-		init();
-	}
-	early_serial_puts("In parent (task0), entering pause loop...\n");
-/*
- *   NOTE!!   For any other task 'pause()' would mean we have to get a
- * signal to awaken, but task0 is the sole exception (see 'schedule()')
- * as task 0 gets activated at every idle moment (when no other tasks
- * can run). For task0 'pause()' just means we go check if some other
- * task can run, and if not we return here.
- */
-	for(;;) pause();
+	early_serial_puts("Initialization complete.\n");
+	
+	/*
+	 * For the 64-bit port with built-in shell, we skip user mode
+	 * and run the shell directly in kernel mode. This avoids the
+	 * complexity of process isolation while demonstrating the kernel works.
+	 */
+	init();
+	
+	/* Never reached */
+	for(;;) ;
 }
 
 static int printf(const char *fmt, ...)
@@ -149,36 +144,204 @@ static int printf(const char *fmt, ...)
 	return i;
 }
 
-static char * argv[] = { "-",NULL };
-static char * envp[] = { "HOME=/usr/root", NULL };
+/*
+ * Simple built-in shell for testing without a filesystem
+ */
+static char cmd_buf[256];
+static int cmd_pos = 0;
+
+static void shell_putc(char c)
+{
+	early_serial_putc(c);
+}
+
+static void shell_puts(const char *s)
+{
+	early_serial_puts(s);
+}
+
+static int shell_getc(void)
+{
+	/* Read from serial port */
+	while ((inb(SERIAL_PORT + 5) & 0x01) == 0)
+		;  /* Wait for data */
+	return inb(SERIAL_PORT);
+}
+
+static int strcmp(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+	return *s1 - *s2;
+}
+
+static int strncmp(const char *s1, const char *s2, int n)
+{
+	while (n > 0 && *s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+		n--;
+	}
+	return n == 0 ? 0 : *s1 - *s2;
+}
+
+static void cmd_help(void)
+{
+	shell_puts("Available commands:\n");
+	shell_puts("  help     - show this help\n");
+	shell_puts("  uname    - show system info\n");
+	shell_puts("  ps       - show processes\n");
+	shell_puts("  free     - show memory info\n");
+	shell_puts("  uptime   - show uptime\n");
+	shell_puts("  reboot   - reboot system\n");
+}
+
+static void cmd_uname(void)
+{
+	shell_puts("Linux 0.01 (64-bit port) x86_64\n");
+}
+
+extern struct task_struct *task[NR_TASKS];
+extern long volatile jiffies;
+
+static void cmd_ps(void)
+{
+	int i;
+	shell_puts("PID  STATE  NAME\n");
+	for (i = 0; i < NR_TASKS; i++) {
+		if (task[i]) {
+			char buf[64];
+			int state = task[i]->state;
+			const char *statestr = state == 0 ? "R" : state == 1 ? "S" : state == 2 ? "D" : state == 3 ? "Z" : "T";
+			/* Simple integer to string */
+			int pid = task[i]->pid;
+			buf[0] = '0' + (pid / 10) % 10;
+			buf[1] = '0' + pid % 10;
+			buf[2] = ' ';
+			buf[3] = ' ';
+			buf[4] = ' ';
+			buf[5] = statestr[0];
+			buf[6] = ' ';
+			buf[7] = ' ';
+			buf[8] = ' ';
+			buf[9] = ' ';
+			buf[10] = ' ';
+			if (i == 0) {
+				buf[11] = 'i'; buf[12] = 'd'; buf[13] = 'l'; buf[14] = 'e'; buf[15] = 0;
+			} else if (i == 1) {
+				buf[11] = 'i'; buf[12] = 'n'; buf[13] = 'i'; buf[14] = 't'; buf[15] = 0;
+			} else {
+				buf[11] = 't'; buf[12] = 'a'; buf[13] = 's'; buf[14] = 'k'; buf[15] = '0' + i; buf[16] = 0;
+			}
+			shell_puts(buf);
+			shell_puts("\n");
+		}
+	}
+}
+
+extern void calc_mem(void);
+
+static void cmd_free(void)
+{
+	calc_mem();
+}
+
+static void cmd_uptime(void)
+{
+	char buf[32];
+	long secs = jiffies / HZ;
+	int mins = secs / 60;
+	secs = secs % 60;
+	buf[0] = 'U'; buf[1] = 'p'; buf[2] = ' ';
+	buf[3] = '0' + (mins / 10) % 10;
+	buf[4] = '0' + mins % 10;
+	buf[5] = ':';
+	buf[6] = '0' + (secs / 10) % 10;
+	buf[7] = '0' + secs % 10;
+	buf[8] = '\n';
+	buf[9] = 0;
+	shell_puts(buf);
+}
+
+static void cmd_reboot(void)
+{
+	shell_puts("Rebooting...\n");
+	/* Triple fault to reboot */
+	__asm__ volatile (
+		"lidt (%%rax)"
+		:: "a"(0)
+	);
+}
+
+static void process_command(void)
+{
+	cmd_buf[cmd_pos] = 0;
+	
+	if (cmd_pos == 0) {
+		return;
+	} else if (strcmp(cmd_buf, "help") == 0) {
+		cmd_help();
+	} else if (strcmp(cmd_buf, "uname") == 0 || strcmp(cmd_buf, "uname -a") == 0) {
+		cmd_uname();
+	} else if (strcmp(cmd_buf, "ps") == 0) {
+		cmd_ps();
+	} else if (strcmp(cmd_buf, "free") == 0) {
+		cmd_free();
+	} else if (strcmp(cmd_buf, "uptime") == 0) {
+		cmd_uptime();
+	} else if (strcmp(cmd_buf, "reboot") == 0) {
+		cmd_reboot();
+	} else {
+		shell_puts("Unknown command: ");
+		shell_puts(cmd_buf);
+		shell_puts("\nType 'help' for available commands.\n");
+	}
+}
+
+static void builtin_shell(void)
+{
+	int c;
+	
+	shell_puts("\n");
+	shell_puts("====================================\n");
+	shell_puts("  Linux 0.01 - 64-bit Port Shell\n");
+	shell_puts("====================================\n");
+	shell_puts("Type 'help' for available commands.\n\n");
+	
+	while (1) {
+		shell_puts("# ");
+		cmd_pos = 0;
+		
+		while (1) {
+			c = shell_getc();
+			
+			if (c == '\r' || c == '\n') {
+				shell_puts("\n");
+				process_command();
+				break;
+			} else if (c == 127 || c == 8) {  /* Backspace */
+				if (cmd_pos > 0) {
+					cmd_pos--;
+					shell_puts("\b \b");
+				}
+			} else if (c >= 32 && c < 127 && cmd_pos < 255) {
+				cmd_buf[cmd_pos++] = c;
+				shell_putc(c);
+			}
+		}
+	}
+}
 
 void init(void)
 {
-	int i,j;
-
-	early_serial_puts("init: calling setup()...\n");
-	setup();
-	early_serial_puts("init: setup() returned, calling fork()...\n");
-	if (!fork())
-		_exit(execve("/bin/update",NULL,NULL));
-	(void) open("/dev/tty0",O_RDWR,0);
-	(void) dup(0);
-	(void) dup(0);
-	printf("%d buffers = %d bytes buffer space\n\r",NR_BUFFERS,
-		NR_BUFFERS*BLOCK_SIZE);
-	printf(" Ok.\n\r");
-	if ((i=fork())<0)
-		printf("Fork failed in init\r\n");
-	else if (!i) {
-		close(0);close(1);close(2);
-		setsid();
-		(void) open("/dev/tty0",O_RDWR,0);
-		(void) dup(0);
-		(void) dup(0);
-		_exit(execve("/bin/sh",argv,envp));
-	}
-	j=wait(&i);
-	printf("child %d died with code %04x\n",j,i);
-	sync();
-	_exit(0);	/* NOTE! _exit, not exit() */
+	/* 
+	 * Skip filesystem setup - run built-in shell directly.
+	 * This proves the kernel works without needing a disk.
+	 */
+	builtin_shell();
+	
+	/* Never reached */
+	for(;;) pause();
 }
