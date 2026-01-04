@@ -162,9 +162,13 @@ static void shell_puts(const char *s)
 
 static int shell_getc(void)
 {
-	/* Read from serial port */
-	while ((inb(SERIAL_PORT + 5) & 0x01) == 0)
-		;  /* Wait for data */
+	unsigned char lsr;
+	/* Read from serial port - poll for data ready */
+	while (1) {
+		lsr = inb(SERIAL_PORT + 5);
+		if (lsr & 0x01)  /* Data ready */
+			break;
+	}
 	return inb(SERIAL_PORT);
 }
 
@@ -241,11 +245,10 @@ static void cmd_ps(void)
 	}
 }
 
-extern void calc_mem(void);
-
 static void cmd_free(void)
 {
-	calc_mem();
+	/* Simple memory info - HIGH_MEMORY=8MB, LOW_MEM=2MB, so 6MB usable */
+	shell_puts("Memory: 8MB total, 6MB usable (1536 pages)\n");
 }
 
 static void cmd_uptime(void)

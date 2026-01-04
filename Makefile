@@ -91,12 +91,14 @@ clean:
 	$(MAKE) -C kernel clean
 	$(MAKE) -C lib clean
 
-# Run the kernel in QEMU
+# Run the kernel in QEMU (Ctrl-C to exit)
+# Uses proper chardev configuration for interactive shell input
 run: Image
-	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic
+	$(QEMU) -drive file=Image,format=raw,if=floppy -display none \
+		-chardev stdio,id=char0,signal=on -serial chardev:char0
 
-# Run with serial output to terminal (Ctrl-A X to exit)
-run-serial: Image
+# Run with QEMU monitor multiplexed (Ctrl-A X to exit, Ctrl-A C for monitor)
+run-monitor: Image
 	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic -serial mon:stdio
 
 # Run with graphical display (for VGA output)

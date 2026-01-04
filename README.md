@@ -33,7 +33,8 @@ make
 make run
 ```
 
-This boots the kernel in QEMU with serial console. The kernel starts a built-in shell with the following commands:
+This boots the kernel in QEMU with serial console connected to your terminal.
+Press Ctrl-C to exit. The kernel starts a built-in shell with the following commands:
 
 - `help`   - Show available commands
 - `uname`  - Show system information
