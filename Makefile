@@ -92,10 +92,9 @@ clean:
 	$(MAKE) -C lib clean
 
 # Run the kernel in QEMU (Ctrl-A X to exit)
+# Uses script(1) for proper PTY handling to enable keyboard input
 run: Image
-	@echo "Starting Linux 0.01 64-bit... (Press Ctrl-A then X to exit)"
-	@echo ""
-	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic
+	@./run.sh
 
 # Run with graphical display (for VGA output)
 run-graphic: Image
