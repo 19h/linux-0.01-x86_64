@@ -36,42 +36,57 @@ extern int tty_write(unsigned minor,char * buf,int count);
 
 typedef int (*fn_ptr)();
 
+/*
+ * FPU state for x86_64 using fxsave/fxrstor (512 bytes)
+ */
 struct i387_struct {
-	long	cwd;
-	long	swd;
-	long	twd;
-	long	fip;
-	long	fcs;
-	long	foo;
-	long	fos;
-	long	st_space[20];	/* 8*10 bytes for each FP-reg = 80 bytes */
-};
+	unsigned short	cwd;
+	unsigned short	swd;
+	unsigned short	twd;
+	unsigned short	fop;
+	unsigned long	rip;
+	unsigned long	rdp;
+	unsigned int	mxcsr;
+	unsigned int	mxcsr_mask;
+	unsigned int	st_space[32];	/* 8*16 bytes for FP regs */
+	unsigned int	xmm_space[64];	/* 16*16 bytes for XMM regs */
+	unsigned int	padding[24];
+} __attribute__((aligned(16)));
 
+/*
+ * 64-bit TSS structure
+ * In long mode, the TSS doesn't contain saved registers - it's only used for:
+ * - Stack pointers for privilege level changes (RSP0, RSP1, RSP2)
+ * - Interrupt Stack Table (IST) pointers
+ * - I/O permission bitmap
+ */
 struct tss_struct {
-	long	back_link;	/* 16 high bits zero */
-	long	esp0;
-	long	ss0;		/* 16 high bits zero */
-	long	esp1;
-	long	ss1;		/* 16 high bits zero */
-	long	esp2;
-	long	ss2;		/* 16 high bits zero */
-	long	cr3;
-	long	eip;
-	long	eflags;
-	long	eax,ecx,edx,ebx;
-	long	esp;
-	long	ebp;
-	long	esi;
-	long	edi;
-	long	es;		/* 16 high bits zero */
-	long	cs;		/* 16 high bits zero */
-	long	ss;		/* 16 high bits zero */
-	long	ds;		/* 16 high bits zero */
-	long	fs;		/* 16 high bits zero */
-	long	gs;		/* 16 high bits zero */
-	long	ldt;		/* 16 high bits zero */
-	long	trace_bitmap;	/* bits: trace 0, bitmap 16-31 */
-	struct i387_struct i387;
+	unsigned int	reserved0;
+	unsigned long	rsp0;		/* Stack pointer for ring 0 */
+	unsigned long	rsp1;		/* Stack pointer for ring 1 */
+	unsigned long	rsp2;		/* Stack pointer for ring 2 */
+	unsigned long	reserved1;
+	unsigned long	ist[7];		/* Interrupt Stack Table */
+	unsigned long	reserved2;
+	unsigned short	reserved3;
+	unsigned short	iopb_offset;	/* I/O permission bitmap offset */
+} __attribute__((packed));
+
+/*
+ * Thread state for context switching
+ * This holds the callee-saved registers and stack pointer
+ */
+struct thread_struct {
+	unsigned long	rsp;		/* Kernel stack pointer */
+	unsigned long	rip;		/* Instruction pointer (for new threads) */
+	unsigned long	rbx;
+	unsigned long	rbp;
+	unsigned long	r12;
+	unsigned long	r13;
+	unsigned long	r14;
+	unsigned long	r15;
+	unsigned long	fs;		/* FS segment base (for TLS) */
+	unsigned long	gs;		/* GS segment base */
 };
 
 struct task_struct {
@@ -100,13 +115,17 @@ struct task_struct {
 	struct file * filp[NR_OPEN];
 /* ldt for this task 0 - zero 1 - cs 2 - ds&ss */
 	struct desc_struct ldt[3];
-/* tss for this task */
-	struct tss_struct tss;
+/* Thread state for context switching */
+	struct thread_struct thread;
+/* FPU state */
+	struct i387_struct i387;
+/* Kernel stack - must be at the end for alignment */
+	unsigned long kernel_stack[1024];  /* 8KB kernel stack */
 };
 
 /*
- *  INIT_TASK is used to set up the first task table, touch at
- * your own risk!. Base=0, limit=0x9ffff (=640kB)
+ * INIT_TASK is used to set up the first task table
+ * For 64-bit, we use flat memory model (base=0, no limit)
  */
 #define INIT_TASK \
 /* state etc */	{ 0,15,15, \
@@ -118,17 +137,14 @@ struct task_struct {
 /* math */	0, \
 /* fs info */	-1,0133,NULL,NULL,0, \
 /* filp */	{NULL,}, \
-	{ \
+/* ldt */	{ \
 		{0,0}, \
-/* ldt */	{0x9f,0xc0fa00}, \
-		{0x9f,0xc0f200}, \
+		{0xFFFF, 0x00AFFA00},  /* 64-bit code: base=0, G=1, L=1, P=1, DPL=3, S=1, type=0xA */ \
+		{0xFFFF, 0x00CFF200},  /* 64-bit data: base=0, G=1, P=1, DPL=3, S=1, type=0x2 */ \
 	}, \
-/*tss*/	{0,PAGE_SIZE+(long)&init_task,0x10,0,0,0,0,(long)&pg_dir,\
-	 0,0,0,0,0,0,0,0, \
-	 0,0,0x17,0x17,0x17,0x17,0x17,0x17, \
-	 _LDT(0),0x80000000, \
-		{} \
-	}, \
+/* thread */	{0,}, \
+/* i387 */	{0,}, \
+/* stack */	{0,}, \
 }
 
 extern struct task_struct *task[NR_TASKS];
@@ -144,87 +160,86 @@ extern void interruptible_sleep_on(struct task_struct ** p);
 extern void wake_up(struct task_struct ** p);
 
 /*
- * Entry into gdt where to find first TSS. 0-nul, 1-cs, 2-ds, 3-syscall
- * 4-TSS0, 5-LDT0, 6-TSS1 etc ...
+ * Entry into gdt where to find first TSS. 0-nul, 1-cs, 2-ds, 3-user_cs, 4-user_ds
+ * 5-6: TSS (16 bytes in 64-bit mode, spans 2 entries)
+ * 7-8: LDT0 (16 bytes in 64-bit mode, spans 2 entries)
+ * etc...
  */
-#define FIRST_TSS_ENTRY 4
-#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+1)
+#define FIRST_TSS_ENTRY 5
+#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+2)  /* TSS is 16 bytes = 2 entries */
 #define _TSS(n) ((((unsigned long) n)<<4)+(FIRST_TSS_ENTRY<<3))
 #define _LDT(n) ((((unsigned long) n)<<4)+(FIRST_LDT_ENTRY<<3))
-#define ltr(n) __asm__("ltr %%ax"::"a" (_TSS(n)))
-#define lldt(n) __asm__("lldt %%ax"::"a" (_LDT(n)))
-#define str(n) \
-__asm__("str %%ax\n\t" \
-	"subl %2,%%eax\n\t" \
-	"shrl $4,%%eax" \
-	:"=a" (n) \
-	:"a" (0),"i" (FIRST_TSS_ENTRY<<3))
+#define ltr(n) __asm__ volatile("ltr %%ax"::"a" (_TSS(n)))
+#define lldt(n) __asm__ volatile("lldt %%ax"::"a" (_LDT(n)))
+
 /*
- *	switch_to(n) should switch tasks to task nr n, first
- * checking that n isn't the current task, in which case it does nothing.
- * This also clears the TS-flag if the task we switched to has used
- * tha math co-processor latest.
+ * Get current task number from TSS selector
  */
-#define switch_to(n) {\
-struct {long a,b;} __tmp; \
-__asm__("cmpl %%ecx,_current\n\t" \
-	"je 1f\n\t" \
-	"xchgl %%ecx,_current\n\t" \
-	"movw %%dx,%1\n\t" \
-	"ljmp %0\n\t" \
-	"cmpl %%ecx,%2\n\t" \
-	"jne 1f\n\t" \
-	"clts\n" \
-	"1:" \
-	::"m" (*&__tmp.a),"m" (*&__tmp.b), \
-	"m" (last_task_used_math),"d" _TSS(n),"c" ((long) task[n])); \
+static inline int get_task_nr(void)
+{
+	unsigned short tr;
+	__asm__ volatile ("str %0" : "=r" (tr));
+	return (tr - (FIRST_TSS_ENTRY << 3)) >> 4;
 }
+#define str(n) ((n) = get_task_nr())
+
+/*
+ * Context switch implementation
+ * __switch_to is implemented in assembly (kernel/switch.nasm)
+ */
+extern struct task_struct *__switch_to(struct task_struct *prev, struct task_struct *next);
+
+/* Global TSS - defined in kernel/sched.c */
+extern struct tss_struct init_tss;
+
+#define switch_to(n) do { \
+	struct task_struct *__next = task[n]; \
+	if (__next && current != __next) { \
+		struct task_struct *__prev = current; \
+		current = __next; \
+		/* Update TSS rsp0 to point to top of new task's kernel stack */ \
+		init_tss.rsp0 = (unsigned long)__next + PAGE_SIZE; \
+		__switch_to(__prev, __next); \
+		if (current == last_task_used_math) \
+			__asm__ volatile ("clts"); \
+	} \
+} while(0)
 
 #define PAGE_ALIGN(n) (((n)+0xfff)&0xfffff000)
 
-#define _set_base(addr,base) \
-__asm__("movw %%dx,%0\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %%dl,%1\n\t" \
-	"movb %%dh,%2" \
-	::"m" (*((addr)+2)), \
-	  "m" (*((addr)+4)), \
-	  "m" (*((addr)+7)), \
-	  "d" (base) \
-	:"dx")
+/*
+ * 64-bit segment descriptor manipulation
+ */
+static inline void _set_base(char *addr, unsigned long base)
+{
+	*(unsigned short *)(addr + 2) = base & 0xFFFF;
+	*(addr + 4) = (base >> 16) & 0xFF;
+	*(addr + 7) = (base >> 24) & 0xFF;
+}
 
-#define _set_limit(addr,limit) \
-__asm__("movw %%dx,%0\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %1,%%dh\n\t" \
-	"andb $0xf0,%%dh\n\t" \
-	"orb %%dh,%%dl\n\t" \
-	"movb %%dl,%1" \
-	::"m" (*(addr)), \
-	  "m" (*((addr)+6)), \
-	  "d" (limit) \
-	:"dx")
+static inline void _set_limit(char *addr, unsigned long limit)
+{
+	*(unsigned short *)addr = limit & 0xFFFF;
+	*(addr + 6) = (*(addr + 6) & 0xF0) | ((limit >> 16) & 0x0F);
+}
 
-#define set_base(ldt,base) _set_base( ((char *)&(ldt)) , base )
-#define set_limit(ldt,limit) _set_limit( ((char *)&(ldt)) , (limit-1)>>12 )
+#define set_base(ldt, base)  _set_base((char *)&(ldt), (unsigned long)(base))
+#define set_limit(ldt, limit) _set_limit((char *)&(ldt), ((limit) - 1) >> 12)
 
-#define _get_base(addr) ({\
-unsigned long __base; \
-__asm__("movb %3,%%dh\n\t" \
-	"movb %2,%%dl\n\t" \
-	"shll $16,%%edx\n\t" \
-	"movw %1,%%dx" \
-	:"=d" (__base) \
-	:"m" (*((addr)+2)), \
-	 "m" (*((addr)+4)), \
-	 "m" (*((addr)+7))); \
-__base;})
+static inline unsigned long _get_base(const char *addr)
+{
+	return (unsigned long)(*(unsigned short *)(addr + 2)) |
+	       ((unsigned long)(*(unsigned char *)(addr + 4)) << 16) |
+	       ((unsigned long)(*(unsigned char *)(addr + 7)) << 24);
+}
 
-#define get_base(ldt) _get_base( ((char *)&(ldt)) )
+#define get_base(ldt) _get_base((const char *)&(ldt))
 
-#define get_limit(segment) ({ \
-unsigned long __limit; \
-__asm__("lsll %1,%0\n\tincl %0":"=r" (__limit):"r" (segment)); \
-__limit;})
+static inline unsigned long get_limit(unsigned long segment)
+{
+	unsigned long limit;
+	__asm__ volatile ("lsl %1, %0" : "=r" (limit) : "r" (segment));
+	return limit + 1;
+}
 
 #endif

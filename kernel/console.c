@@ -6,13 +6,7 @@
  *	'void con_write(struct tty_queue * queue)'
  * Hopefully this will be a rather complete VT102 implementation.
  *
- */
-
-/*
- *  NOTE!!! We sometimes disable and enable interrupts for a short while
- * (to put a word in video IO), but this will work even for keyboard
- * interrupts. We know interrupts aren't enabled when getting a keyboard
- * interrupt, as we use trap-gates. Hopefully all is well.
+ * Updated for x86_64 - replaced inline assembly with C equivalents
  */
 
 #include <linux/sched.h>
@@ -45,6 +39,29 @@ static unsigned char attr=0x07;
  */
 #define RESPONSE "\033[?1;2c"
 
+/* Helper: fill memory with word value */
+static inline void memsetw(unsigned short *dest, unsigned short val, unsigned long count)
+{
+	while (count--)
+		*dest++ = val;
+}
+
+/* Helper: copy words forward */
+static inline void memcpyw(unsigned short *dest, const unsigned short *src, unsigned long count)
+{
+	while (count--)
+		*dest++ = *src++;
+}
+
+/* Helper: copy words backward */
+static inline void memcpyw_backward(unsigned short *dest, const unsigned short *src, unsigned long count)
+{
+	dest += count;
+	src += count;
+	while (count--)
+		*--dest = *--src;
+}
+
 static inline void gotoxy(unsigned int new_x,unsigned int new_y)
 {
 	if (new_x>=columns || new_y>=lines)
@@ -71,59 +88,39 @@ static void scrup(void)
 		pos += columns<<1;
 		scr_end += columns<<1;
 		if (scr_end>SCREEN_END) {
-			__asm__("cld\n\t"
-				"rep\n\t"
-				"movsl\n\t"
-				"movl _columns,%1\n\t"
-				"rep\n\t"
-				"stosw"
-				::"a" (0x0720),
-				"c" ((lines-1)*columns>>1),
-				"D" (SCREEN_START),
-				"S" (origin)
-				:"cx","di","si");
+			/* Copy screen content to start, then clear last line */
+			memcpyw((unsigned short *)SCREEN_START,
+				(unsigned short *)origin,
+				(lines-1)*columns);
+			memsetw((unsigned short *)(SCREEN_START + (lines-1)*columns*2),
+				0x0720, columns);
 			scr_end -= origin-SCREEN_START;
 			pos -= origin-SCREEN_START;
 			origin = SCREEN_START;
 		} else {
-			__asm__("cld\n\t"
-				"rep\n\t"
-				"stosl"
-				::"a" (0x07200720),
-				"c" (columns>>1),
-				"D" (scr_end-(columns<<1))
-				:"cx","di");
+			/* Just clear the new bottom line */
+			memsetw((unsigned short *)(scr_end-(columns<<1)),
+				0x0720, columns);
 		}
 		set_origin();
 	} else {
-		__asm__("cld\n\t"
-			"rep\n\t"
-			"movsl\n\t"
-			"movl _columns,%%ecx\n\t"
-			"rep\n\t"
-			"stosw"
-			::"a" (0x0720),
-			"c" ((bottom-top-1)*columns>>1),
-			"D" (origin+(columns<<1)*top),
-			"S" (origin+(columns<<1)*(top+1))
-			:"cx","di","si");
+		/* Scroll a region - copy lines up, clear bottom line */
+		memcpyw((unsigned short *)(origin+(columns<<1)*top),
+			(unsigned short *)(origin+(columns<<1)*(top+1)),
+			(bottom-top-1)*columns);
+		memsetw((unsigned short *)(origin+(columns<<1)*(bottom-1)),
+			0x0720, columns);
 	}
 }
 
 static void scrdown(void)
 {
-	__asm__("std\n\t"
-		"rep\n\t"
-		"movsl\n\t"
-		"addl $2,%%edi\n\t"	/* %edi has been decremented by 4 */
-		"movl _columns,%%ecx\n\t"
-		"rep\n\t"
-		"stosw"
-		::"a" (0x0720),
-		"c" ((bottom-top-1)*columns>>1),
-		"D" (origin+(columns<<1)*bottom-4),
-		"S" (origin+(columns<<1)*(bottom-1)-4)
-		:"ax","cx","di","si");
+	/* Scroll region down - copy lines down, clear top line */
+	memcpyw_backward((unsigned short *)(origin+(columns<<1)*(top+1)),
+			(unsigned short *)(origin+(columns<<1)*top),
+			(bottom-top-1)*columns);
+	memsetw((unsigned short *)(origin+(columns<<1)*top),
+		0x0720, columns);
 }
 
 static void lf(void)
@@ -161,69 +158,59 @@ static void del(void)
 	}
 }
 
-static void csi_J(int par)
+static void csi_J(int vpar)
 {
-	long count __asm__("cx");
-	long start __asm__("di");
+	long count;
+	unsigned short *start;
 
-	switch (par) {
+	switch (vpar) {
 		case 0:	/* erase from cursor to end of display */
 			count = (scr_end-pos)>>1;
-			start = pos;
+			start = (unsigned short *)pos;
 			break;
 		case 1:	/* erase from start to cursor */
 			count = (pos-origin)>>1;
-			start = origin;
+			start = (unsigned short *)origin;
 			break;
 		case 2: /* erase whole display */
 			count = columns*lines;
-			start = origin;
+			start = (unsigned short *)origin;
 			break;
 		default:
 			return;
 	}
-	__asm__("cld\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		::"c" (count),
-		"D" (start),"a" (0x0720)
-		:"cx","di");
+	memsetw(start, 0x0720, count);
 }
 
-static void csi_K(int par)
+static void csi_K(int vpar)
 {
-	long count __asm__("cx");
-	long start __asm__("di");
+	long count;
+	unsigned short *start;
 
-	switch (par) {
+	switch (vpar) {
 		case 0:	/* erase from cursor to end of line */
 			if (x>=columns)
 				return;
 			count = columns-x;
-			start = pos;
+			start = (unsigned short *)pos;
 			break;
 		case 1:	/* erase from start of line to cursor */
-			start = pos - (x<<1);
+			start = (unsigned short *)(pos - (x<<1));
 			count = (x<columns)?x:columns;
 			break;
 		case 2: /* erase whole line */
-			start = pos - (x<<1);
+			start = (unsigned short *)(pos - (x<<1));
 			count = columns;
 			break;
 		default:
 			return;
 	}
-	__asm__("cld\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		::"c" (count),
-		"D" (start),"a" (0x0720)
-		:"cx","di");
+	memsetw(start, 0x0720, count);
 }
 
 void csi_m(void)
 {
-	int i;
+	unsigned int i;
 
 	for (i=0;i<=npar;i++)
 		switch (par[i]) {
@@ -260,7 +247,7 @@ static void respond(struct tty_struct * tty)
 
 static void insert_char(void)
 {
-	int i=x;
+	unsigned int i=x;
 	unsigned short tmp,old=0x0720;
 	unsigned short * p = (unsigned short *) pos;
 
@@ -274,7 +261,7 @@ static void insert_char(void)
 
 static void insert_line(void)
 {
-	int oldtop,oldbottom;
+	unsigned long oldtop,oldbottom;
 
 	oldtop=top;
 	oldbottom=bottom;
@@ -287,7 +274,7 @@ static void insert_line(void)
 
 static void delete_char(void)
 {
-	int i;
+	unsigned int i;
 	unsigned short * p = (unsigned short *) pos;
 
 	if (x>=columns)
@@ -302,7 +289,7 @@ static void delete_char(void)
 
 static void delete_line(void)
 {
-	int oldtop,oldbottom;
+	unsigned long oldtop,oldbottom;
 
 	oldtop=top;
 	oldbottom=bottom;
@@ -313,7 +300,7 @@ static void delete_line(void)
 	bottom=oldbottom;
 }
 
-static void csi_at(int nr)
+static void csi_at(unsigned int nr)
 {
 	if (nr>columns)
 		nr=columns;
@@ -323,7 +310,7 @@ static void csi_at(int nr)
 		insert_char();
 }
 
-static void csi_L(int nr)
+static void csi_L(unsigned int nr)
 {
 	if (nr>lines)
 		nr=lines;
@@ -333,7 +320,7 @@ static void csi_L(int nr)
 		insert_line();
 }
 
-static void csi_P(int nr)
+static void csi_P(unsigned int nr)
 {
 	if (nr>columns)
 		nr=columns;
@@ -343,7 +330,7 @@ static void csi_P(int nr)
 		delete_char();
 }
 
-static void csi_M(int nr)
+static void csi_M(unsigned int nr)
 {
 	if (nr>lines)
 		nr=lines;
@@ -353,8 +340,8 @@ static void csi_M(int nr)
 		delete_line();
 }
 
-static int saved_x=0;
-static int saved_y=0;
+static unsigned long saved_x=0;
+static unsigned long saved_y=0;
 
 static void save_cur(void)
 {
@@ -385,10 +372,8 @@ void con_write(struct tty_struct * tty)
 						pos -= columns<<1;
 						lf();
 					}
-					__asm__("movb _attr,%%ah\n\t"
-						"movw %%ax,%1\n\t"
-						::"a" (c),"m" (*(short *)pos)
-						:"ax");
+					/* Write character with attribute */
+					*(unsigned short *)pos = (attr << 8) | (unsigned char)c;
 					pos += 2;
 					x++;
 				} else if (c==27)
@@ -438,8 +423,9 @@ void con_write(struct tty_struct * tty)
 					par[npar]=0;
 				npar=0;
 				state=3;
-				if (ques=(c=='?'))
+				if ((ques=(c=='?')))
 					break;
+				/* fall through */
 			case 3:
 				if (c==';' && npar<NPAR-1) {
 					npar++;
@@ -448,6 +434,7 @@ void con_write(struct tty_struct * tty)
 					par[npar]=10*par[npar]+c-'0';
 					break;
 				} else state=4;
+				/* fall through */
 			case 4:
 				state=0;
 				switch(c) {

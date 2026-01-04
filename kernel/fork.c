@@ -1,8 +1,10 @@
 /*
  *  'fork.c' contains the help-routines for the 'fork' system call
- * (see also system_call.s), and some misc functions ('verify_area').
+ * (see also system_call.nasm), and some misc functions ('verify_area').
  * Fork is rather simple, once you get the hang of it, but the memory
  * management can be a bitch. See 'mm/mm.c': 'copy_page_tables()'
+ *
+ * 64-bit version: Uses thread_struct for context, not hardware TSS
  */
 #include <errno.h>
 
@@ -12,6 +14,7 @@
 #include <asm/system.h>
 
 extern void write_verify(unsigned long address);
+extern void ret_from_fork(void);
 
 long last_pid=0;
 
@@ -54,24 +57,32 @@ int copy_mem(int nr,struct task_struct * p)
 }
 
 /*
- *  Ok, this is the main fork-routine. It copies the system process
- * information (task[nr]) and sets up the necessary registers. It
- * also copies the data segment in it's entirety.
+ *  Ok, this is the main fork-routine for 64-bit mode.
+ *
+ * In 64-bit mode, we don't use hardware task switching. Instead:
+ * - thread_struct holds the kernel context (rsp, callee-saved regs)
+ * - The child's kernel stack is set up to return from the fork syscall
+ * - No per-task TSS; just update init_tss.rsp0 on context switch
+ *
+ * Parameters come from sys_fork in system_call.nasm which reads
+ * saved registers from the interrupt/syscall stack frame.
  */
-int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
-		long ebx,long ecx,long edx,
-		long fs,long es,long ds,
-		long eip,long cs,long eflags,long esp,long ss)
+int copy_process(int nr, long rbp, long user_rdi, long user_rsi, long gs, 
+		long none,
+		long rbx, long rcx, long rdx,
+		long fs, long es, long ds,
+		long rip, long cs, long rflags, long rsp, long ss)
 {
 	struct task_struct *p;
 	int i;
 	struct file *f;
+	unsigned long *kstack;
 
 	p = (struct task_struct *) get_free_page();
 	if (!p)
 		return -EAGAIN;
 	*p = *current;	/* NOTE! this doesn't copy the supervisor stack */
-	p->state = TASK_RUNNING;
+	p->state = TASK_UNINTERRUPTIBLE;  /* prevent running until fully set up */
 	p->pid = last_pid;
 	p->father = current->pid;
 	p->counter = p->priority;
@@ -81,42 +92,97 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 	p->utime = p->stime = 0;
 	p->cutime = p->cstime = 0;
 	p->start_time = jiffies;
-	p->tss.back_link = 0;
-	p->tss.esp0 = PAGE_SIZE + (long) p;
-	p->tss.ss0 = 0x10;
-	p->tss.eip = eip;
-	p->tss.eflags = eflags;
-	p->tss.eax = 0;
-	p->tss.ecx = ecx;
-	p->tss.edx = edx;
-	p->tss.ebx = ebx;
-	p->tss.esp = esp;
-	p->tss.ebp = ebp;
-	p->tss.esi = esi;
-	p->tss.edi = edi;
-	p->tss.es = es & 0xffff;
-	p->tss.cs = cs & 0xffff;
-	p->tss.ss = ss & 0xffff;
-	p->tss.ds = ds & 0xffff;
-	p->tss.fs = fs & 0xffff;
-	p->tss.gs = gs & 0xffff;
-	p->tss.ldt = _LDT(nr);
-	p->tss.trace_bitmap = 0x80000000;
+	
+	/*
+	 * Set up the child's kernel stack.
+	 * 
+	 * When __switch_to returns, it pops the return address and jumps there.
+	 * We set that up to be ret_from_fork, which then does ret_from_sys_call
+	 * to restore all registers and iretq back to user mode.
+	 *
+	 * The stack needs to look like what SAVE_ALL created, but with RAX=0
+	 * (fork return value for child).
+	 */
+	kstack = (unsigned long *)((unsigned long)p + PAGE_SIZE);
+	
+	/* Build the same stack frame as SAVE_ALL, top to bottom */
+	/* CPU interrupt frame (what iretq will pop) */
+	*--kstack = ss;            /* SS */
+	*--kstack = rsp;           /* RSP (user stack) */
+	*--kstack = rflags;        /* RFLAGS */
+	*--kstack = cs;            /* CS */
+	*--kstack = rip;           /* RIP (return address in user code) */
+	
+	/* General purpose registers (what RESTORE_ALL will pop) */
+	*--kstack = 0;             /* R15 */
+	*--kstack = 0;             /* R14 */
+	*--kstack = 0;             /* R13 */
+	*--kstack = 0;             /* R12 */
+	*--kstack = 0;             /* R11 */
+	*--kstack = 0;             /* R10 */
+	*--kstack = 0;             /* R9 */
+	*--kstack = 0;             /* R8 */
+	*--kstack = rbp;           /* RBP */
+	*--kstack = user_rsi;      /* RSI */
+	*--kstack = user_rdi;      /* RDI */
+	*--kstack = rdx;           /* RDX */
+	*--kstack = rcx;           /* RCX */
+	*--kstack = rbx;           /* RBX */
+	*--kstack = 0;             /* RAX = 0 (fork returns 0 in child) */
+	
+	/* Segment registers */
+	*--kstack = gs;            /* GS */
+	*--kstack = fs;            /* FS */
+	*--kstack = es;            /* ES */
+	*--kstack = ds;            /* DS */
+	
+	/* 
+	 * Now set up thread_struct for __switch_to.
+	 * When we switch to this task, __switch_to will:
+	 * 1. Restore RSP from thread.rsp 
+	 * 2. Restore callee-saved regs (rbx, rbp, r12-r15)
+	 * 3. ret (which pops ret_from_fork address)
+	 *
+	 * So we need to push ret_from_fork as the return address.
+	 */
+	*--kstack = (unsigned long)ret_from_fork;
+	
+	/* Set up thread struct - __switch_to will restore these */
+	p->thread.rsp = (unsigned long)kstack;
+	p->thread.rbx = rbx;
+	p->thread.rbp = rbp;
+	p->thread.r12 = 0;
+	p->thread.r13 = 0;
+	p->thread.r14 = 0;
+	p->thread.r15 = 0;
+	p->thread.fs = fs;
+	p->thread.gs = gs;
+	
+	/* Save FPU state if parent used math */
 	if (last_task_used_math == current)
-		__asm__("fnsave %0"::"m" (p->tss.i387));
+		__asm__ volatile("fxsave %0" : "=m" (p->i387));
+	
 	if (copy_mem(nr,p)) {
 		free_page((long) p);
 		return -EAGAIN;
 	}
+	
 	for (i=0; i<NR_OPEN;i++)
-		if (f=p->filp[i])
+		if ((f=p->filp[i]) != NULL)
 			f->f_count++;
 	if (current->pwd)
 		current->pwd->i_count++;
 	if (current->root)
 		current->root->i_count++;
-	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));
+	
+	/*
+	 * In 64-bit mode, we don't set up per-task TSS descriptors.
+	 * There's only one TSS (init_tss), and we update rsp0 on context switch.
+	 * We still set up per-task LDT for compatibility.
+	 */
 	set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&(p->ldt));
+	
+	p->state = TASK_RUNNING;  /* Now it's safe to run */
 	task[nr] = p;	/* do this last, just in case */
 	return last_pid;
 }

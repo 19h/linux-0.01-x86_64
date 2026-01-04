@@ -7,399 +7,262 @@
 
 #ifndef _SIZE_T
 #define _SIZE_T
-typedef unsigned int size_t;
+typedef unsigned long size_t;
 #endif
 
 extern char * strerror(int errno);
 
 /*
- * This string-include defines all string functions as inline
- * functions. Use gcc. It also assumes ds=es=data space, this should be
- * normal. Most of the string-functions are rather heavily hand-optimized,
- * see especially strtok,strstr,str[c]spn. They should work, but are not
- * very easy to understand. Everything is done entirely within the register
- * set, making the functions fast and clean. String instructions have been
- * used through-out, making for "slightly" unclear code :-)
- *
- *		(C) 1991 Linus Torvalds
+ * String functions for x86_64
+ * 
+ * The original Linux 0.01 used heavily optimized i386 inline assembly.
+ * For the 64-bit port, we use simpler C implementations that the compiler
+ * can optimize. These can be replaced with optimized assembly later.
  */
- 
-extern inline char * strcpy(char * dest,const char *src)
+
+static inline char * strcpy(char * dest, const char *src)
 {
-__asm__("cld\n"
-	"1:\tlodsb\n\t"
-	"stosb\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b"
-	::"S" (src),"D" (dest):"si","di","ax");
-return dest;
+	char *d = dest;
+	while ((*d++ = *src++) != '\0')
+		;
+	return dest;
 }
 
-extern inline char * strncpy(char * dest,const char *src,int count)
+static inline char * strncpy(char * dest, const char *src, int count)
 {
-__asm__("cld\n"
-	"1:\tdecl %2\n\t"
-	"js 2f\n\t"
-	"lodsb\n\t"
-	"stosb\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b\n\t"
-	"rep\n\t"
-	"stosb\n"
-	"2:"
-	::"S" (src),"D" (dest),"c" (count):"si","di","ax","cx");
-return dest;
+	char *d = dest;
+	while (count > 0 && (*d++ = *src++) != '\0')
+		count--;
+	while (count-- > 0)
+		*d++ = '\0';
+	return dest;
 }
 
-extern inline char * strcat(char * dest,const char * src)
+static inline char * strcat(char * dest, const char * src)
 {
-__asm__("cld\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"decl %1\n"
-	"1:\tlodsb\n\t"
-	"stosb\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b"
-	::"S" (src),"D" (dest),"a" (0),"c" (0xffffffff):"si","di","ax","cx");
-return dest;
+	char *d = dest;
+	while (*d)
+		d++;
+	while ((*d++ = *src++) != '\0')
+		;
+	return dest;
 }
 
-extern inline char * strncat(char * dest,const char * src,int count)
+static inline char * strncat(char * dest, const char * src, int count)
 {
-__asm__("cld\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"decl %1\n\t"
-	"movl %4,%3\n"
-	"1:\tdecl %3\n\t"
-	"js 2f\n\t"
-	"lodsb\n\t"
-	"stosb\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b\n"
-	"2:\txorl %2,%2\n\t"
-	"stosb"
-	::"S" (src),"D" (dest),"a" (0),"c" (0xffffffff),"g" (count)
-	:"si","di","ax","cx");
-return dest;
+	char *d = dest;
+	while (*d)
+		d++;
+	while (count-- > 0 && (*d = *src++) != '\0')
+		d++;
+	*d = '\0';
+	return dest;
 }
 
-extern inline int strcmp(const char * cs,const char * ct)
+static inline int strcmp(const char * cs, const char * ct)
 {
-register int __res __asm__("ax");
-__asm__("cld\n"
-	"1:\tlodsb\n\t"
-	"scasb\n\t"
-	"jne 2f\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b\n\t"
-	"xorl %%eax,%%eax\n\t"
-	"jmp 3f\n"
-	"2:\tmovl $1,%%eax\n\t"
-	"jl 3f\n\t"
-	"negl %%eax\n"
-	"3:"
-	:"=a" (__res):"D" (cs),"S" (ct):"si","di");
-return __res;
+	while (*cs && *cs == *ct) {
+		cs++;
+		ct++;
+	}
+	return (unsigned char)*cs - (unsigned char)*ct;
 }
 
-extern inline int strncmp(const char * cs,const char * ct,int count)
+static inline int strncmp(const char * cs, const char * ct, int count)
 {
-register int __res __asm__("ax");
-__asm__("cld\n"
-	"1:\tdecl %3\n\t"
-	"js 2f\n\t"
-	"lodsb\n\t"
-	"scasb\n\t"
-	"jne 3f\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b\n"
-	"2:\txorl %%eax,%%eax\n\t"
-	"jmp 4f\n"
-	"3:\tmovl $1,%%eax\n\t"
-	"jl 4f\n\t"
-	"negl %%eax\n"
-	"4:"
-	:"=a" (__res):"D" (cs),"S" (ct),"c" (count):"si","di","cx");
-return __res;
+	while (count > 0 && *cs && *cs == *ct) {
+		cs++;
+		ct++;
+		count--;
+	}
+	if (count == 0)
+		return 0;
+	return (unsigned char)*cs - (unsigned char)*ct;
 }
 
-extern inline char * strchr(const char * s,char c)
+static inline char * strchr(const char * s, char c)
 {
-register char * __res __asm__("ax");
-__asm__("cld\n\t"
-	"movb %%al,%%ah\n"
-	"1:\tlodsb\n\t"
-	"cmpb %%ah,%%al\n\t"
-	"je 2f\n\t"
-	"testb %%al,%%al\n\t"
-	"jne 1b\n\t"
-	"movl $1,%1\n"
-	"2:\tmovl %1,%0\n\t"
-	"decl %0"
-	:"=a" (__res):"S" (s),"0" (c):"si");
-return __res;
+	while (*s) {
+		if (*s == c)
+			return (char *)s;
+		s++;
+	}
+	return c ? NULL : (char *)s;
 }
 
-extern inline char * strrchr(const char * s,char c)
+static inline char * strrchr(const char * s, char c)
 {
-register char * __res __asm__("dx");
-__asm__("cld\n\t"
-	"movb %%al,%%ah\n"
-	"1:\tlodsb\n\t"
-	"cmpb %%ah,%%al\n\t"
-	"jne 2f\n\t"
-	"movl %%esi,%0\n\t"
-	"decl %0\n"
-	"2:\ttestb %%al,%%al\n\t"
-	"jne 1b"
-	:"=d" (__res):"0" (0),"S" (s),"a" (c):"ax","si");
-return __res;
+	const char *last = NULL;
+	while (*s) {
+		if (*s == c)
+			last = s;
+		s++;
+	}
+	return c ? (char *)last : (char *)s;
 }
 
-extern inline int strspn(const char * cs, const char * ct)
+static inline int strspn(const char * cs, const char * ct)
 {
-register char * __res __asm__("si");
-__asm__("cld\n\t"
-	"movl %4,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"
-	"movl %%ecx,%%edx\n"
-	"1:\tlodsb\n\t"
-	"testb %%al,%%al\n\t"
-	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"je 1b\n"
-	"2:\tdecl %0"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
-return __res-cs;
+	const char *s = cs;
+	const char *p;
+	while (*s) {
+		for (p = ct; *p; p++)
+			if (*p == *s)
+				break;
+		if (!*p)
+			break;
+		s++;
+	}
+	return s - cs;
 }
 
-extern inline int strcspn(const char * cs, const char * ct)
+static inline int strcspn(const char * cs, const char * ct)
 {
-register char * __res __asm__("si");
-__asm__("cld\n\t"
-	"movl %4,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"
-	"movl %%ecx,%%edx\n"
-	"1:\tlodsb\n\t"
-	"testb %%al,%%al\n\t"
-	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"jne 1b\n"
-	"2:\tdecl %0"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
-return __res-cs;
+	const char *s = cs;
+	const char *p;
+	while (*s) {
+		for (p = ct; *p; p++)
+			if (*p == *s)
+				return s - cs;
+		s++;
+	}
+	return s - cs;
 }
 
-extern inline char * strpbrk(const char * cs,const char * ct)
+static inline char * strpbrk(const char * cs, const char * ct)
 {
-register char * __res __asm__("si");
-__asm__("cld\n\t"
-	"movl %4,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"
-	"movl %%ecx,%%edx\n"
-	"1:\tlodsb\n\t"
-	"testb %%al,%%al\n\t"
-	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"jne 1b\n\t"
-	"decl %0\n\t"
-	"jmp 3f\n"
-	"2:\txorl %0,%0\n"
-	"3:"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
-return __res;
+	const char *p;
+	while (*cs) {
+		for (p = ct; *p; p++)
+			if (*p == *cs)
+				return (char *)cs;
+		cs++;
+	}
+	return NULL;
 }
 
-extern inline char * strstr(const char * cs,const char * ct)
+static inline char * strstr(const char * cs, const char * ct)
 {
-register char * __res __asm__("ax");
-__asm__("cld\n\t" \
-	"movl %4,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"	/* NOTE! This also sets Z if searchstring='' */
-	"movl %%ecx,%%edx\n"
-	"1:\tmovl %4,%%edi\n\t"
-	"movl %%esi,%%eax\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repe\n\t"
-	"cmpsb\n\t"
-	"je 2f\n\t"		/* also works for empty string, see above */
-	"xchgl %%eax,%%esi\n\t"
-	"incl %%esi\n\t"
-	"cmpb $0,-1(%%eax)\n\t"
-	"jne 1b\n\t"
-	"xorl %%eax,%%eax\n\t"
-	"2:"
-	:"=a" (__res):"0" (0),"c" (0xffffffff),"S" (cs),"g" (ct)
-	:"cx","dx","di","si");
-return __res;
+	const char *s, *p, *q;
+	if (!*ct)
+		return (char *)cs;
+	for (s = cs; *s; s++) {
+		p = s;
+		q = ct;
+		while (*p && *q && *p == *q) {
+			p++;
+			q++;
+		}
+		if (!*q)
+			return (char *)s;
+	}
+	return NULL;
 }
 
-extern inline int strlen(const char * s)
+static inline int strlen(const char * s)
 {
-register int __res __asm__("cx");
-__asm__("cld\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %0\n\t"
-	"decl %0"
-	:"=c" (__res):"D" (s),"a" (0),"0" (0xffffffff):"di");
-return __res;
+	const char *sc = s;
+	while (*sc)
+		sc++;
+	return sc - s;
 }
 
 extern char * ___strtok;
 
-extern inline char * strtok(char * s,const char * ct)
+static inline char * strtok(char * s, const char * ct)
 {
-register char * __res __asm__("si");
-__asm__("testl %1,%1\n\t"
-	"jne 1f\n\t"
-	"testl %0,%0\n\t"
-	"je 8f\n\t"
-	"movl %0,%1\n"
-	"1:\txorl %0,%0\n\t"
-	"movl $-1,%%ecx\n\t"
-	"xorl %%eax,%%eax\n\t"
-	"cld\n\t"
-	"movl %4,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"
-	"je 7f\n\t"			/* empty delimeter-string */
-	"movl %%ecx,%%edx\n"
-	"2:\tlodsb\n\t"
-	"testb %%al,%%al\n\t"
-	"je 7f\n\t"
-	"movl %4,%%edi\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"je 2b\n\t"
-	"decl %1\n\t"
-	"cmpb $0,(%1)\n\t"
-	"je 7f\n\t"
-	"movl %1,%0\n"
-	"3:\tlodsb\n\t"
-	"testb %%al,%%al\n\t"
-	"je 5f\n\t"
-	"movl %4,%%edi\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"jne 3b\n\t"
-	"decl %1\n\t"
-	"cmpb $0,(%1)\n\t"
-	"je 5f\n\t"
-	"movb $0,(%1)\n\t"
-	"incl %1\n\t"
-	"jmp 6f\n"
-	"5:\txorl %1,%1\n"
-	"6:\tcmpb $0,(%0)\n\t"
-	"jne 7f\n\t"
-	"xorl %0,%0\n"
-	"7:\ttestl %0,%0\n\t"
-	"jne 8f\n\t"
-	"movl %0,%1\n"
-	"8:"
-	:"=b" (__res),"=S" (___strtok)
-	:"0" (___strtok),"1" (s),"g" (ct)
-	:"ax","cx","dx","di");
-return __res;
+	char *token;
+	const char *p;
+	
+	if (s)
+		___strtok = s;
+	if (!___strtok)
+		return NULL;
+	
+	/* Skip leading delimiters */
+	while (*___strtok) {
+		for (p = ct; *p; p++)
+			if (*p == *___strtok)
+				break;
+		if (!*p)
+			break;
+		___strtok++;
+	}
+	
+	if (!*___strtok)
+		return NULL;
+	
+	token = ___strtok;
+	
+	/* Find end of token */
+	while (*___strtok) {
+		for (p = ct; *p; p++)
+			if (*p == *___strtok) {
+				*___strtok++ = '\0';
+				return token;
+			}
+		___strtok++;
+	}
+	
+	___strtok = NULL;
+	return token;
 }
 
-extern inline void * memcpy(void * dest,const void * src, int n)
+static inline void * memcpy(void * dest, const void * src, int n)
 {
-__asm__("cld\n\t"
-	"rep\n\t"
-	"movsb"
-	::"c" (n),"S" (src),"D" (dest)
-	:"cx","si","di");
-return dest;
+	char *d = dest;
+	const char *s = src;
+	while (n--)
+		*d++ = *s++;
+	return dest;
 }
 
-extern inline void * memmove(void * dest,const void * src, int n)
+static inline void * memmove(void * dest, const void * src, int n)
 {
-if (dest<src)
-__asm__("cld\n\t"
-	"rep\n\t"
-	"movsb"
-	::"c" (n),"S" (src),"D" (dest)
-	:"cx","si","di");
-else
-__asm__("std\n\t"
-	"rep\n\t"
-	"movsb"
-	::"c" (n),"S" (src+n-1),"D" (dest+n-1)
-	:"cx","si","di");
-return dest;
+	char *d = dest;
+	const char *s = src;
+	if (d < s) {
+		while (n--)
+			*d++ = *s++;
+	} else {
+		d += n;
+		s += n;
+		while (n--)
+			*--d = *--s;
+	}
+	return dest;
 }
 
-extern inline int memcmp(const void * cs,const void * ct,int count)
+static inline int memcmp(const void * cs, const void * ct, int count)
 {
-register int __res __asm__("ax");
-__asm__("cld\n\t"
-	"repe\n\t"
-	"cmpsb\n\t"
-	"je 1f\n\t"
-	"movl $1,%%eax\n\t"
-	"jl 1f\n\t"
-	"negl %%eax\n"
-	"1:"
-	:"=a" (__res):"0" (0),"D" (cs),"S" (ct),"c" (count)
-	:"si","di","cx");
-return __res;
+	const unsigned char *s1 = cs;
+	const unsigned char *s2 = ct;
+	while (count--) {
+		if (*s1 != *s2)
+			return *s1 - *s2;
+		s1++;
+		s2++;
+	}
+	return 0;
 }
 
-extern inline void * memchr(const void * cs,char c,int count)
+static inline void * memchr(const void * cs, char c, int count)
 {
-register void * __res __asm__("di");
-if (!count)
+	const unsigned char *s = cs;
+	while (count--) {
+		if (*s == (unsigned char)c)
+			return (void *)s;
+		s++;
+	}
 	return NULL;
-__asm__("cld\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"je 1f\n\t"
-	"movl $1,%0\n"
-	"1:\tdecl %0"
-	:"=D" (__res):"a" (c),"D" (cs),"c" (count)
-	:"cx");
-return __res;
 }
 
-extern inline void * memset(void * s,char c,int count)
+static inline void * memset(void * s, char c, int count)
 {
-__asm__("cld\n\t"
-	"rep\n\t"
-	"stosb"
-	::"a" (c),"D" (s),"c" (count)
-	:"cx","di");
-return s;
+	char *d = s;
+	while (count--)
+		*d++ = c;
+	return s;
 }
 
 #endif

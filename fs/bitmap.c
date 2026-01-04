@@ -4,37 +4,50 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 
-#define clear_block(addr) \
-__asm__("cld\n\t" \
-	"rep\n\t" \
-	"stosl" \
-	::"a" (0),"c" (BLOCK_SIZE/4),"D" ((long) (addr)):"cx","di")
+/*
+ * 64-bit compatible versions of bitmap operations
+ */
 
-#define set_bit(nr,addr) ({\
-register int res __asm__("ax"); \
-__asm__("btsl %2,%3\n\tsetb %%al":"=a" (res):"0" (0),"r" (nr),"m" (*(addr))); \
-res;})
+static inline void clear_block(void *addr)
+{
+	memset(addr, 0, BLOCK_SIZE);
+}
 
-#define clear_bit(nr,addr) ({\
-register int res __asm__("ax"); \
-__asm__("btrl %2,%3\n\tsetnb %%al":"=a" (res):"0" (0),"r" (nr),"m" (*(addr))); \
-res;})
+static inline int set_bit(int nr, void *addr)
+{
+	int *p = (int *)addr;
+	int mask = 1 << (nr & 31);
+	int old = p[nr >> 5] & mask;
+	p[nr >> 5] |= mask;
+	return old != 0;
+}
 
-#define find_first_zero(addr) ({ \
-int __res; \
-__asm__("cld\n" \
-	"1:\tlodsl\n\t" \
-	"notl %%eax\n\t" \
-	"bsfl %%eax,%%edx\n\t" \
-	"je 2f\n\t" \
-	"addl %%edx,%%ecx\n\t" \
-	"jmp 3f\n" \
-	"2:\taddl $32,%%ecx\n\t" \
-	"cmpl $8192,%%ecx\n\t" \
-	"jl 1b\n" \
-	"3:" \
-	:"=c" (__res):"c" (0),"S" (addr):"ax","dx","si"); \
-__res;})
+static inline int clear_bit(int nr, void *addr)
+{
+	int *p = (int *)addr;
+	int mask = 1 << (nr & 31);
+	int old = p[nr >> 5] & mask;
+	p[nr >> 5] &= ~mask;
+	return old == 0;  /* returns 1 if bit was already clear */
+}
+
+static inline int find_first_zero(void *addr)
+{
+	unsigned int *p = (unsigned int *)addr;
+	int i, j;
+	
+	for (i = 0; i < 8192/32; i++) {
+		if (p[i] != 0xFFFFFFFF) {
+			/* Found a word with at least one zero bit */
+			unsigned int val = ~p[i];
+			for (j = 0; j < 32; j++) {
+				if (val & (1 << j))
+					return i * 32 + j;
+			}
+		}
+	}
+	return 8192;
+}
 
 void free_block(int dev, int block)
 {

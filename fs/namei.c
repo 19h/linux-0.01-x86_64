@@ -49,22 +49,23 @@ static int permission(struct m_inode * inode,int mask)
  * some sanity tests.
  *
  * NOTE! unlike strncmp, match returns 1 for success, 0 for failure.
+ *
+ * For 64-bit, we use a simple C implementation instead of inline assembly.
  */
-static int match(int len,const char * name,struct dir_entry * de)
+static int match(int len, const char * name, struct dir_entry * de)
 {
-	register int same __asm__("ax");
+	int i;
 
 	if (!de || !de->inode || len > NAME_LEN)
 		return 0;
 	if (len < NAME_LEN && de->name[len])
 		return 0;
-	__asm__("cld\n\t"
-		"fs ; repe ; cmpsb\n\t"
-		"setz %%al"
-		:"=a" (same)
-		:"0" (0),"S" ((long) name),"D" ((long) de->name),"c" (len)
-		:"cx","di","si");
-	return same;
+	/* Compare using fs segment (user space) */
+	for (i = 0; i < len; i++) {
+		if (get_fs_byte(name + i) != de->name[i])
+			return 0;
+	}
+	return 1;
 }
 
 /*

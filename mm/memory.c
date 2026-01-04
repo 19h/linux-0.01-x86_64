@@ -7,8 +7,13 @@
 
 int do_exit(long code);
 
-#define invalidate() \
-__asm__("movl %%eax,%%cr3"::"a" (0))
+/* Invalidate TLB by reloading CR3 */
+static inline void invalidate(void)
+{
+	unsigned long cr3;
+	__asm__ volatile ("movq %%cr3, %0" : "=r"(cr3));
+	__asm__ volatile ("movq %0, %%cr3" :: "r"(cr3));
+}
 
 #if (BUFFER_END < 0x100000)
 #define LOW_MEM 0x100000
@@ -25,8 +30,15 @@ __asm__("movl %%eax,%%cr3"::"a" (0))
 #error "Won't work"
 #endif
 
-#define copy_page(from,to) \
-__asm__("cld ; rep ; movsl"::"S" (from),"D" (to),"c" (1024):"cx","di","si")
+/* Copy 4KB page */
+static inline void copy_page(unsigned long from, unsigned long to)
+{
+	unsigned long *src = (unsigned long *)from;
+	unsigned long *dst = (unsigned long *)to;
+	int i;
+	for (i = 0; i < 4096/sizeof(unsigned long); i++)
+		dst[i] = src[i];
+}
 
 static unsigned short mem_map [ PAGING_PAGES ] = {0,};
 
@@ -36,24 +48,25 @@ static unsigned short mem_map [ PAGING_PAGES ] = {0,};
  */
 unsigned long get_free_page(void)
 {
-register unsigned long __res asm("ax");
-
-__asm__("std ; repne ; scasw\n\t"
-	"jne 1f\n\t"
-	"movw $1,2(%%edi)\n\t"
-	"sall $12,%%ecx\n\t"
-	"movl %%ecx,%%edx\n\t"
-	"addl %2,%%edx\n\t"
-	"movl $1024,%%ecx\n\t"
-	"leal 4092(%%edx),%%edi\n\t"
-	"rep ; stosl\n\t"
-	"movl %%edx,%%eax\n"
-	"1:"
-	:"=a" (__res)
-	:"0" (0),"i" (LOW_MEM),"c" (PAGING_PAGES),
-	"D" (mem_map+PAGING_PAGES-1)
-	:"di","cx","dx");
-return __res;
+	int i;
+	unsigned long page;
+	
+	/* Search backwards for a free page */
+	for (i = PAGING_PAGES - 1; i >= 0; i--) {
+		if (mem_map[i] == 0) {
+			mem_map[i] = 1;
+			page = LOW_MEM + (i << 12);
+			/* Zero the page */
+			{
+				unsigned long *p = (unsigned long *)page;
+				int j;
+				for (j = 0; j < 4096/sizeof(unsigned long); j++)
+					p[j] = 0;
+			}
+			return page;
+		}
+	}
+	return 0;
 }
 
 /*

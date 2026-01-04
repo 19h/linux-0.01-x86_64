@@ -125,55 +125,71 @@
 #define __NR_getpgrp	65
 #define __NR_setsid	66
 
+/*
+ * x86_64 syscall convention:
+ * - syscall number in rax
+ * - arguments in rdi, rsi, rdx, r10, r8, r9
+ * - return value in rax
+ * - rcx and r11 are clobbered by syscall
+ *
+ * Note: For this early kernel, we still use int $0x80 for simplicity
+ * since we haven't set up the SYSCALL/SYSRET MSRs. The 64-bit int $0x80
+ * handler uses the same register convention as 32-bit for compatibility.
+ */
+
 #define _syscall0(type,name) \
 type name(void) \
 { \
-type __res; \
+long __res; \
 __asm__ volatile ("int $0x80" \
 	: "=a" (__res) \
-	: "0" (__NR_##name)); \
+	: "0" ((long)__NR_##name) \
+	: "memory"); \
 if (__res >= 0) \
-	return __res; \
+	return (type)__res; \
 errno = -__res; \
-return -1; \
+return (type)-1; \
 }
 
 #define _syscall1(type,name,atype,a) \
 type name(atype a) \
 { \
-type __res; \
+long __res; \
 __asm__ volatile ("int $0x80" \
 	: "=a" (__res) \
-	: "0" (__NR_##name),"b" (a)); \
+	: "0" ((long)__NR_##name),"b" ((long)(a)) \
+	: "memory"); \
 if (__res >= 0) \
-	return __res; \
+	return (type)__res; \
 errno = -__res; \
-return -1; \
+return (type)-1; \
 }
 
 #define _syscall2(type,name,atype,a,btype,b) \
 type name(atype a,btype b) \
 { \
-type __res; \
+long __res; \
 __asm__ volatile ("int $0x80" \
 	: "=a" (__res) \
-	: "0" (__NR_##name),"b" (a),"c" (b)); \
+	: "0" ((long)__NR_##name),"b" ((long)(a)),"c" ((long)(b)) \
+	: "memory"); \
 if (__res >= 0) \
-	return __res; \
+	return (type)__res; \
 errno = -__res; \
-return -1; \
+return (type)-1; \
 }
 
 #define _syscall3(type,name,atype,a,btype,b,ctype,c) \
 type name(atype a,btype b,ctype c) \
 { \
-type __res; \
+long __res; \
 __asm__ volatile ("int $0x80" \
 	: "=a" (__res) \
-	: "0" (__NR_##name),"b" (a),"c" (b),"d" (c)); \
+	: "0" ((long)__NR_##name),"b" ((long)(a)),"c" ((long)(b)),"d" ((long)(c)) \
+	: "memory"); \
 if (__res<0) \
 	errno=-__res , __res = -1; \
-return __res;\
+return (type)__res;\
 }
 
 #endif /* __LIBRARY__ */
@@ -201,7 +217,12 @@ int execle(const char * pathname, char * arg0, ...);
 volatile void exit(int status);
 volatile void _exit(int status);
 int fcntl(int fildes, int cmd, ...);
+#ifndef __LIBRARY__
+/* fork, pause, sync are defined as static inline in main.c when __LIBRARY__ is set */
 int fork(void);
+int pause(void);
+int sync(void);
+#endif
 int getpid(void);
 int getuid(void);
 int geteuid(void);
@@ -215,7 +236,6 @@ int mknod(const char * filename, mode_t mode, dev_t dev);
 int mount(const char * specialfile, const char * dir, int rwflag);
 int nice(int val);
 int open(const char * filename, int flag, ...);
-int pause(void);
 int pipe(int * fildes);
 int read(int fildes, char * buf, off_t count);
 int setpgrp(void);
@@ -226,7 +246,6 @@ void (*signal(int sig, void (*fn)(int)))(int);
 int stat(const char * filename, struct stat * stat_buf);
 int fstat(int fildes, struct stat * stat_buf);
 int stime(time_t * tptr);
-int sync(void);
 time_t time(time_t * tloc);
 time_t times(struct tms * tbuf);
 int ulimit(int cmd, long limit);

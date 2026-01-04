@@ -1,96 +1,113 @@
 #
-# Makefile for linux.
-# If you don't have '-mstring-insns' in your gcc (and nobody but me has :-)
-# remove them from the CFLAGS defines.
+# Makefile for linux 0.01 - 64-bit version
 #
 
-AS86	=as -0 -a
-CC86	=cc -0
-LD86	=ld -0
+# Cross-compiler for x86_64
+# On macOS: brew install x86_64-elf-gcc
+# On Linux: apt install gcc
+CROSS_COMPILE ?= x86_64-elf-
 
-AS	=gas
-LD	=gld
-LDFLAGS	=-s -x -M
-CC	=gcc
-CFLAGS	=-Wall -O -fstrength-reduce -fomit-frame-pointer -fcombine-regs
-CPP	=gcc -E -nostdinc -Iinclude
+# QEMU emulator
+QEMU = qemu-system-x86_64
 
-ARCHIVES=kernel/kernel.o mm/mm.o fs/fs.o
-LIBS	=lib/lib.a
+# Assembler
+NASM    = nasm
+NASM16  = $(NASM) -f bin
+NASM64  = $(NASM) -f elf64
 
-.c.s:
-	$(CC) $(CFLAGS) \
-	-nostdinc -Iinclude -S -o $*.s $<
-.s.o:
-	$(AS) -c -o $*.o $<
+# Toolchain
+AS      = $(NASM64)
+LD      = $(CROSS_COMPILE)ld
+CC      = $(CROSS_COMPILE)gcc
+AR      = $(CROSS_COMPILE)ar
+OBJCOPY = $(CROSS_COMPILE)objcopy
+
+# Get absolute path to project root for includes
+ROOT_DIR := $(shell pwd)
+
+# Compiler flags for freestanding 64-bit kernel
+CFLAGS  = -Wall -O2 -ffreestanding -fno-stack-protector -fno-builtin \
+          -fno-pie -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+          -nostdinc -I$(ROOT_DIR)/include -m64
+
+LDFLAGS = -nostdlib -z max-page-size=0x1000
+
+CPP     = $(CC) -E -nostdinc -Iinclude
+
+# Export for sub-makes
+export CROSS_COMPILE CC LD AR CFLAGS NASM NASM64
+
+ARCHIVES = kernel/kernel.o mm/mm.o fs/fs.o
+LIBS     = lib/lib.a
+
 .c.o:
-	$(CC) $(CFLAGS) \
-	-nostdinc -Iinclude -c -o $*.o $<
+	$(CC) $(CFLAGS) -c -o $*.o $<
 
-all:	Image
+all: Image
 
-Image: boot/boot tools/system tools/build
-	tools/build boot/boot tools/system > Image
-	sync
+Image: boot/boot.bin tools/system tools/build
+	tools/build boot/boot.bin tools/system > Image
+	@# Pad Image to 1.44MB (required for QEMU floppy emulation to work correctly with head 1)
+	@dd if=/dev/zero of=Image bs=1 count=1 seek=1474559 conv=notrunc 2>/dev/null
+	@echo "Built 64-bit kernel image: Image"
 
 tools/build: tools/build.c
-	$(CC) $(CFLAGS) \
-	-o tools/build tools/build.c
-	chmem +65000 tools/build
+	cc -Wall -O2 -o tools/build tools/build.c
 
-boot/head.o: boot/head.s
+# Boot sector stays 16-bit (real mode entry)
+boot/boot.bin: boot/boot_s.nasm tools/system
+	@SYSSIZE=$$(( (`stat -f%z tools/system 2>/dev/null || stat -c%s tools/system` + 15) / 16 )); \
+	$(NASM16) -DSYSSIZE=$$SYSSIZE -o boot/boot.bin boot/boot_s.nasm
 
-tools/system:	boot/head.o init/main.o \
-		$(ARCHIVES) $(LIBS)
-	$(LD) $(LDFLAGS) boot/head.o init/main.o \
-	$(ARCHIVES) \
-	$(LIBS) \
-	-o tools/system > System.map
+# Head contains both 32-bit (entry from boot) and 64-bit code
+# It needs special handling
+boot/head.o: boot/head.nasm
+	$(NASM) -f elf64 -o boot/head.o boot/head.nasm
+
+tools/system.elf: boot/head.o init/main.o $(ARCHIVES) $(LIBS)
+	$(LD) $(LDFLAGS) -T kernel.ld -o tools/system.elf \
+		boot/head.o init/main.o $(ARCHIVES) $(LIBS)
+
+tools/system: tools/system.elf
+	$(OBJCOPY) -O binary tools/system.elf tools/system
 
 kernel/kernel.o:
-	(cd kernel; make)
+	$(MAKE) -C kernel
 
 mm/mm.o:
-	(cd mm; make)
+	$(MAKE) -C mm
 
 fs/fs.o:
-	(cd fs; make)
+	$(MAKE) -C fs
 
 lib/lib.a:
-	(cd lib; make)
-
-boot/boot:	boot/boot.s tools/system
-	(echo -n "SYSSIZE = (";ls -l tools/system | grep system \
-		| cut -c25-31 | tr '\012' ' '; echo "+ 15 ) / 16") > tmp.s
-	cat boot/boot.s >> tmp.s
-	$(AS86) -o boot/boot.o tmp.s
-	rm -f tmp.s
-	$(LD86) -s -o boot/boot boot/boot.o
+	$(MAKE) -C lib
 
 clean:
-	rm -f Image System.map tmp_make boot/boot core
-	rm -f init/*.o boot/*.o tools/system tools/build
-	(cd mm;make clean)
-	(cd fs;make clean)
-	(cd kernel;make clean)
-	(cd lib;make clean)
+	rm -f Image System.map boot/boot.bin boot/tmp_boot.nasm core
+	rm -f init/*.o boot/*.o tools/system tools/system.elf tools/build
+	$(MAKE) -C mm clean
+	$(MAKE) -C fs clean
+	$(MAKE) -C kernel clean
+	$(MAKE) -C lib clean
 
-backup: clean
-	(cd .. ; tar cf - linux | compress16 - > backup.Z)
-	sync
+# Run the kernel in QEMU
+run: Image
+	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic
 
-dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	(for i in init/*.c;do echo -n "init/";$(CPP) -M $$i;done) >> tmp_make
-	cp tmp_make Makefile
-	(cd fs; make dep)
-	(cd kernel; make dep)
-	(cd mm; make dep)
+# Run with serial output to terminal (Ctrl-A X to exit)
+run-serial: Image
+	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic -serial mon:stdio
 
-### Dependencies:
-init/main.o : init/main.c include/unistd.h include/sys/stat.h \
-  include/sys/types.h include/sys/times.h include/sys/utsname.h \
-  include/utime.h include/time.h include/linux/tty.h include/termios.h \
-  include/linux/sched.h include/linux/head.h include/linux/fs.h \
-  include/linux/mm.h include/asm/system.h include/asm/io.h include/stddef.h \
-  include/stdarg.h include/fcntl.h 
+# Run with graphical display (for VGA output)
+run-graphic: Image
+	$(QEMU) -drive file=Image,format=raw,if=floppy
+
+# Run with GDB debugging enabled (connect with: gdb -ex "target remote :1234")
+debug: Image
+	$(QEMU) -drive file=Image,format=raw,if=floppy -nographic -s -S
+
+# Build and boot (alias for run)
+boot: run
+
+.PHONY: all clean kernel/kernel.o mm/mm.o fs/fs.o lib/lib.a run run-serial run-graphic debug boot

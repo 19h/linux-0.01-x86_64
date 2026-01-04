@@ -1,0 +1,346 @@
+     1                                  ;
+     2                                  ; boot.s - 64-bit Linux 0.01 bootloader
+     3                                  ;
+     4                                  ; This bootloader:
+     5                                  ; 1. Loads the kernel at 0x10000
+     6                                  ; 2. Moves it to 0x100000 (1MB mark)
+     7                                  ; 3. Sets up GDT for 32-bit protected mode
+     8                                  ; 4. Jumps to head.s which will transition to 64-bit long mode
+     9                                  ;
+    10                                  ; NOTE: The 64-bit transition happens in head.s because
+    11                                  ; we need more space than 512 bytes for page tables setup.
+    12                                  ;
+    13                                  
+    14                                  [BITS 16]
+    15                                  [ORG 0]
+    16                                  
+    17                                  ; 1.44MB floppy: 18 sectors per track
+    18                                  sectors equ 18
+    19                                  
+    20                                  ; SYSSIZE is set by Makefile based on kernel size
+    21                                  %ifndef SYSSIZE
+    22                                  SYSSIZE equ 0x7F00
+    23                                  %endif
+    24                                  
+    25                                  BOOTSEG equ 0x07c0
+    26                                  INITSEG equ 0x9000
+    27                                  SYSSEG  equ 0x1000          ; Load kernel at 0x10000
+    28                                  ENDSEG  equ SYSSEG + SYSSIZE
+    29                                  
+    30                                  _start:
+    31 00000000 B8C007                      mov     ax, BOOTSEG
+    32 00000003 8ED8                        mov     ds, ax
+    33 00000005 B80090                      mov     ax, INITSEG
+    34 00000008 8EC0                        mov     es, ax
+    35 0000000A B90001                      mov     cx, 256
+    36 0000000D 31F6                        xor     si, si
+    37 0000000F 31FF                        xor     di, di
+    38 00000011 F3A5                        rep     movsw
+    39 00000013 EA[1800]0090                jmp     INITSEG:go
+    40                                  
+    41                                  go:
+    42 00000018 8CC8                        mov     ax, cs
+    43 0000001A 8ED8                        mov     ds, ax
+    44 0000001C 8EC0                        mov     es, ax
+    45 0000001E 8ED0                        mov     ss, ax
+    46 00000020 BC0004                      mov     sp, 0x400
+    47                                  
+    48                                      ; Display loading message
+    49 00000023 B403                        mov     ah, 0x03
+    50 00000025 30FF                        xor     bh, bh
+    51 00000027 CD10                        int     0x10
+    52                                  
+    53 00000029 B91E00                      mov     cx, msg1_len
+    54 0000002C BB0700                      mov     bx, 0x0007
+    55 0000002F BD[BE01]                    mov     bp, msg1
+    56 00000032 B80113                      mov     ax, 0x1301
+    57 00000035 CD10                        int     0x10
+    58                                  
+    59                                      ; Load system at 0x10000
+    60 00000037 B80010                      mov     ax, SYSSEG
+    61 0000003A 8EC0                        mov     es, ax
+    62                                      
+    63 0000003C E89900                      call    read_it
+    64 0000003F E85201                      call    kill_motor
+    65                                  
+    66                                      ; Save cursor position
+    67 00000042 B403                        mov     ah, 0x03
+    68 00000044 30FF                        xor     bh, bh
+    69 00000046 CD10                        int     0x10
+    70 00000048 8916FE01                    mov     [510], dx
+    71                                  
+    72                                      ; Disable interrupts for mode switch
+    73 0000004C FA                          cli
+    74                                  
+    75                                      ; Move system from 0x10000 to 0x100000 (1MB)
+    76                                      ; We need to use 32-bit addressing, so we'll do this in protected mode
+    77                                      ; For now, we do a simple copy in real mode using unreal mode trick
+    78                                      
+    79                                      ; First, move system to 0x0 temporarily (will be overwritten by page tables)
+    80                                      ; Actually, let's keep it simple and move in head.s after we're in protected mode
+    81                                      
+    82                                      ; Enable A20 line
+    83 0000004D E86B00                      call    empty_8042
+    84 00000050 B0D1                        mov     al, 0xD1
+    85 00000052 E664                        out     0x64, al
+    86 00000054 E86400                      call    empty_8042
+    87 00000057 B0DF                        mov     al, 0xDF
+    88 00000059 E660                        out     0x60, al
+    89 0000005B E85D00                      call    empty_8042
+    90                                  
+    91                                      ; Reprogram PICs
+    92 0000005E B011                        mov     al, 0x11
+    93 00000060 E620                        out     0x20, al
+    94 00000062 EB00                        jmp     short $+2
+    95 00000064 EB00                        jmp     short $+2
+    96 00000066 E6A0                        out     0xA0, al
+    97 00000068 EB00                        jmp     short $+2
+    98 0000006A EB00                        jmp     short $+2
+    99 0000006C B020                        mov     al, 0x20        ; IRQ 0-7 -> INT 0x20-0x27
+   100 0000006E E621                        out     0x21, al
+   101 00000070 EB00                        jmp     short $+2
+   102 00000072 EB00                        jmp     short $+2
+   103 00000074 B028                        mov     al, 0x28        ; IRQ 8-15 -> INT 0x28-0x2F
+   104 00000076 E6A1                        out     0xA1, al
+   105 00000078 EB00                        jmp     short $+2
+   106 0000007A EB00                        jmp     short $+2
+   107 0000007C B004                        mov     al, 0x04
+   108 0000007E E621                        out     0x21, al
+   109 00000080 EB00                        jmp     short $+2
+   110 00000082 EB00                        jmp     short $+2
+   111 00000084 B002                        mov     al, 0x02
+   112 00000086 E6A1                        out     0xA1, al
+   113 00000088 EB00                        jmp     short $+2
+   114 0000008A EB00                        jmp     short $+2
+   115 0000008C B001                        mov     al, 0x01
+   116 0000008E E621                        out     0x21, al
+   117 00000090 EB00                        jmp     short $+2
+   118 00000092 EB00                        jmp     short $+2
+   119 00000094 E6A1                        out     0xA1, al
+   120 00000096 EB00                        jmp     short $+2
+   121 00000098 EB00                        jmp     short $+2
+   122 0000009A B0FF                        mov     al, 0xFF        ; Mask all interrupts
+   123 0000009C E621                        out     0x21, al
+   124 0000009E EB00                        jmp     short $+2
+   125 000000A0 EB00                        jmp     short $+2
+   126 000000A2 E6A1                        out     0xA1, al
+   127                                  
+   128                                      ; Load GDT and enter protected mode
+   129 000000A4 0F0116[B801]                lgdt    [gdt_ptr]
+   130                                      
+   131 000000A9 0F20C0                      mov     eax, cr0
+   132 000000AC 6683C801                    or      eax, 1
+   133 000000B0 0F22C0                      mov     cr0, eax
+   134                                  
+   135                                      ; Jump to 32-bit code at 0x10000 (where kernel was loaded)
+   136 000000B3 66EA000001000800            jmp     dword 0x08:0x10000
+   137                                  
+   138                                  ; Wait for keyboard controller
+   139                                  empty_8042:
+   140 000000BB EB00                        jmp     short $+2
+   141 000000BD EB00                        jmp     short $+2
+   142 000000BF E464                        in      al, 0x64
+   143 000000C1 A802                        test    al, 2
+   144 000000C3 75F6                        jnz     empty_8042
+   145 000000C5 C3                          ret
+   146                                  
+   147                                  ; Disk read routines
+   148                                  ; Variables (in relocated boot sector at 0x90000)
+   149 000000C6 0100                    sread:  dw 1                ; sectors read of current track (starts at 1, sector after boot)
+   150 000000C8 0000                    head:   dw 0                ; current head
+   151 000000CA 0000                    track:  dw 0                ; current track
+   152                                  
+   153                                  ;
+   154                                  ; read_it - Read kernel from floppy to memory at ES:0
+   155                                  ; Entry: ES = starting segment (0x1000)
+   156                                  ; Uses:  ES, BX for destination, reads until ES >= ENDSEG
+   157                                  ;
+   158                                  ; Debug: print character in AL to screen
+   159                                  ;
+   160                                  debug_char:
+   161 000000CC 50                          push    ax
+   162 000000CD 53                          push    bx
+   163 000000CE B40E                        mov     ah, 0x0E        ; Teletype output
+   164 000000D0 BB0700                      mov     bx, 0x0007      ; Page 0, attribute 7
+   165 000000D3 CD10                        int     0x10
+   166 000000D5 5B                          pop     bx
+   167 000000D6 58                          pop     ax
+   168 000000D7 C3                          ret
+   169                                  
+   170                                  read_it:
+   171 000000D8 8CC0                        mov     ax, es
+   172 000000DA A9FF0F                      test    ax, 0x0fff      ; ES must be at 64KB boundary
+   173                                  .die:
+   174 000000DD 75FE                        jnz     .die
+   175 000000DF 31DB                        xor     bx, bx          ; BX = offset within segment (starts at 0)
+   176                                  
+   177                                  .rp_read:
+   178                                      ; Debug: print ES value (high nibble of high byte only for brevity)
+   179 000000E1 50                          push    ax
+   180 000000E2 8CC0                        mov     ax, es
+   181 000000E4 C1E80C                      shr     ax, 12          ; Get top nibble of segment
+   182 000000E7 3C0A                        cmp     al, 10
+   183 000000E9 7204                        jb      .es_digit
+   184 000000EB 0437                        add     al, 'A' - 10
+   185 000000ED EB02                        jmp     .es_print
+   186                                  .es_digit:
+   187 000000EF 0430                        add     al, '0'
+   188                                  .es_print:
+   189 000000F1 E8D8FF                      call    debug_char
+   190 000000F4 58                          pop     ax
+   191                                      
+   192                                      ; Check if we've loaded enough
+   193 000000F5 8CC0                        mov     ax, es
+   194 000000F7 3D008F                      cmp     ax, ENDSEG
+   195 000000FA 7201                        jb      .ok1_read
+   196                                      
+   197 000000FC C3                          ret                     ; Done loading
+   198                                  
+   199                                  .ok1_read:
+   200                                      ; Calculate sectors to read
+   201                                      ; AX = sectors remaining on current track
+   202 000000FD B81200                      mov     ax, sectors     ; 18 sectors per track
+   203 00000100 2B06[C600]                  sub     ax, [sread]     ; minus sectors already read
+   204                                      
+   205                                      ; Check if reading this many would overflow the segment
+   206 00000104 89C1                        mov     cx, ax
+   207 00000106 C1E109                      shl     cx, 9           ; CX = bytes to read
+   208 00000109 01D9                        add     cx, bx          ; CX = ending offset
+   209 0000010B 7309                        jnc     .ok2_read       ; No overflow, use calculated count
+   210 0000010D 7407                        je      .ok2_read       ; Exactly at boundary is OK
+   211                                      
+   212                                      ; Would overflow - calculate sectors to reach segment boundary
+   213 0000010F 31C0                        xor     ax, ax
+   214 00000111 29D8                        sub     ax, bx          ; AX = bytes remaining in segment
+   215 00000113 C1E809                      shr     ax, 9           ; AX = sectors that fit
+   216                                  
+   217                                  .ok2_read:
+   218                                      ; AX = number of sectors to read (must be > 0)
+   219 00000116 85C0                        test    ax, ax
+   220 00000118 7439                        jz      .next_segment   ; If 0 sectors, move to next segment
+   221                                      
+   222                                      ; Debug: print sector count as hex digit
+   223 0000011A 50                          push    ax
+   224 0000011B 3C0A                        cmp     al, 10
+   225 0000011D 7204                        jb      .print_digit
+   226 0000011F 0437                        add     al, 'A' - 10
+   227 00000121 EB02                        jmp     .do_print
+   228                                  .print_digit:
+   229 00000123 0430                        add     al, '0'
+   230                                  .do_print:
+   231 00000125 E8A4FF                      call    debug_char
+   232 00000128 58                          pop     ax
+   233                                      
+   234 00000129 E83A00                      call    read_track      ; Read sectors, returns actual count in AL
+   235                                      
+   236                                      ; Update position
+   237 0000012C 89C1                        mov     cx, ax          ; CX = sectors actually read
+   238 0000012E 0306[C600]                  add     ax, [sread]     ; Update sread
+   239 00000132 83F812                      cmp     ax, sectors     ; Finished this track?
+   240 00000135 7512                        jne     .ok3_read
+   241                                      
+   242                                      ; Move to next track
+   243 00000137 B80100                      mov     ax, 1
+   244 0000013A 2B06[C800]                  sub     ax, [head]      ; Toggle head (0->1 or 1->0)
+   245 0000013E 7504                        jne     .ok4_read
+   246 00000140 FF06[CA00]                  inc     word [track]    ; If head wrapped to 0, next cylinder
+   247                                  .ok4_read:
+   248 00000144 A3[C800]                    mov     [head], ax
+   249 00000147 31C0                        xor     ax, ax          ; Reset sread to 0 for new track
+   250                                  
+   251                                  .ok3_read:
+   252 00000149 A3[C600]                    mov     [sread], ax
+   253                                      
+   254                                      ; Advance buffer pointer
+   255 0000014C C1E109                      shl     cx, 9           ; CX = bytes read
+   256 0000014F 01CB                        add     bx, cx          ; BX += bytes
+   257 00000151 738E                        jnc     .rp_read        ; If no overflow, continue in same segment
+   258                                  
+   259                                  .next_segment:
+   260                                      ; Debug: print 'S' for segment change
+   261 00000153 50                          push    ax
+   262 00000154 B053                        mov     al, 'S'
+   263 00000156 E873FF                      call    debug_char
+   264 00000159 58                          pop     ax
+   265                                      
+   266                                      ; Move to next 64KB segment
+   267 0000015A 8CC0                        mov     ax, es
+   268 0000015C 050010                      add     ax, 0x1000      ; Next segment
+   269 0000015F 8EC0                        mov     es, ax
+   270 00000161 31DB                        xor     bx, bx          ; Reset offset
+   271 00000163 E97BFF                      jmp     .rp_read
+   272                                  
+   273                                  ;
+   274                                  ; read_track - Read sectors from floppy
+   275                                  ; Entry: AL = number of sectors to read
+   276                                  ; Exit:  AL = number of sectors actually read
+   277                                  ; Uses:  Reads to ES:BX
+   278                                  ;
+   279                                  read_track:
+   280 00000166 53                          push    bx
+   281 00000167 51                          push    cx
+   282 00000168 52                          push    dx
+   283 00000169 56                          push    si
+   284                                      
+   285 0000016A 89C6                        mov     si, ax          ; SI = save sector count for retry
+   286                                      
+   287                                  .retry:
+   288 0000016C 89F0                        mov     ax, si          ; AL = sectors to read
+   289 0000016E B402                        mov     ah, 2           ; AH = BIOS read function
+   290                                      
+   291 00000170 8B16[CA00]                  mov     dx, [track]
+   292 00000174 8B0E[C600]                  mov     cx, [sread]
+   293 00000178 41                          inc     cx              ; CL = starting sector (1-based)
+   294 00000179 88D5                        mov     ch, dl          ; CH = cylinder/track number
+   295                                      
+   296 0000017B 8B16[C800]                  mov     dx, [head]
+   297 0000017F 88D6                        mov     dh, dl          ; DH = head
+   298 00000181 B200                        mov     dl, 0           ; DL = drive 0
+   299                                      
+   300 00000183 CD13                        int     0x13
+   301 00000185 7205                        jc      .error
+   302                                      
+   303                                      ; Success - AL contains sectors read
+   304 00000187 5E                          pop     si
+   305 00000188 5A                          pop     dx
+   306 00000189 59                          pop     cx
+   307 0000018A 5B                          pop     bx
+   308 0000018B C3                          ret
+   309                                  
+   310                                  .error:
+   311                                      ; Reset disk controller and retry
+   312 0000018C 31C0                        xor     ax, ax
+   313 0000018E 31D2                        xor     dx, dx
+   314 00000190 CD13                        int     0x13
+   315 00000192 EBD8                        jmp     .retry
+   316                                  
+   317                                  kill_motor:
+   318 00000194 52                          push    dx
+   319 00000195 BAF203                      mov     dx, 0x3f2
+   320 00000198 30C0                        xor     al, al
+   321 0000019A EE                          out     dx, al
+   322 0000019B 5A                          pop     dx
+   323 0000019C C3                          ret
+   324                                  
+   325                                  ; GDT for initial protected mode entry
+   326                                  ; We'll set up the real 64-bit GDT in head.s
+   327 0000019D 90<rep 3h>              align 8
+   328                                  gdt:
+   329 000001A0 0000000000000000            dq 0x0000000000000000   ; Null descriptor
+   330 000001A8 FFFF0000009ACF00            dq 0x00CF9A000000FFFF   ; 32-bit code segment, base 0, limit 4GB
+   331 000001B0 FFFF00000092CF00            dq 0x00CF92000000FFFF   ; 32-bit data segment, base 0, limit 4GB
+   332                                  
+   333                                  gdt_ptr:
+   334 000001B8 1700                        dw $ - gdt - 1          ; GDT limit
+   335 000001BA [A0010900]                  dd gdt + 0x90000        ; GDT base (relocated to 0x90000)
+   336                                  
+   337                                  msg1:
+   338 000001BE 0D0A4C6F6164696E67-         db 13, 10, "Loading 64-bit system...", 13, 10, 13, 10
+   338 000001C7 2036342D6269742073-
+   338 000001D0 797374656D2E2E2E0D-
+   338 000001D9 0A0D0A             
+   339                                  msg1_len equ $ - msg1
+   340                                  
+   341                                  ; Pad to 510 bytes and add boot signature
+   342 000001DC 00<rep 22h>             times 510 - ($ - $$) db 0
+   343 000001FE 55AA                    dw 0xAA55

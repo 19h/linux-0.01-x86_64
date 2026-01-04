@@ -35,7 +35,36 @@ static inline _syscall0(int,sync)
 
 static char printbuf[1024];
 
-extern int vsprintf();
+/* Early serial debug output - works before any init */
+#define SERIAL_PORT 0x3f8
+
+static inline void early_serial_init(void)
+{
+	outb(0x00, SERIAL_PORT + 1);    /* Disable all interrupts */
+	outb(0x80, SERIAL_PORT + 3);    /* Enable DLAB */
+	outb(0x01, SERIAL_PORT + 0);    /* Set divisor to 1 (115200 baud) */
+	outb(0x00, SERIAL_PORT + 1);    /* High byte */
+	outb(0x03, SERIAL_PORT + 3);    /* 8 bits, no parity, one stop bit */
+	outb(0xC7, SERIAL_PORT + 2);    /* Enable FIFO */
+	outb(0x0B, SERIAL_PORT + 4);    /* IRQs enabled, RTS/DSR set */
+}
+
+static inline void early_serial_putc(char c)
+{
+	while ((inb(SERIAL_PORT + 5) & 0x20) == 0);
+	outb(c, SERIAL_PORT);
+}
+
+static inline void early_serial_puts(const char *s)
+{
+	while (*s) {
+		if (*s == '\n')
+			early_serial_putc('\r');
+		early_serial_putc(*s++);
+	}
+}
+
+extern int vsprintf(char *buf, const char *fmt, va_list args);
 extern void init(void);
 extern void hd_init(void);
 extern long kernel_mktime(struct tm * tm);
@@ -82,6 +111,8 @@ void main(void)		/* This really IS void, no error here. */
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
+	early_serial_init();
+	early_serial_puts("Linux 0.01 (64-bit) starting...\n");
 	time_init();
 	tty_init();
 	trap_init();
@@ -89,6 +120,7 @@ void main(void)		/* This really IS void, no error here. */
 	buffer_init();
 	hd_init();
 	sti();
+	early_serial_puts("Initialization complete, entering user mode...\n");
 	move_to_user_mode();
 	if (!fork()) {		/* we count on this going ok */
 		init();

@@ -65,11 +65,20 @@ static void rw_abs_hd(int rw,unsigned int nr,unsigned int sec,unsigned int head,
 	unsigned int cyl,struct buffer_head * bh);
 void hd_init(void);
 
-#define port_read(port,buf,nr) \
-__asm__("cld;rep;insw"::"d" (port),"D" (buf),"c" (nr):"cx","di")
+/* Port I/O operations for 64-bit */
+static inline void port_read(int port, void *buf, int nr)
+{
+	unsigned short *p = (unsigned short *)buf;
+	while (nr--)
+		*p++ = inw(port);
+}
 
-#define port_write(port,buf,nr) \
-__asm__("cld;rep;outsw"::"d" (port),"S" (buf),"c" (nr):"cx","si")
+static inline void port_write(int port, const void *buf, int nr)
+{
+	const unsigned short *p = (const unsigned short *)buf;
+	while (nr--)
+		outw(*p++, port);
+}
 
 extern void hd_interrupt(void);
 

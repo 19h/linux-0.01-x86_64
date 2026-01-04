@@ -38,18 +38,44 @@ struct {
 	long * a;
 	short b;
 	} stack_start = { & user_stack [PAGE_SIZE>>2] , 0x10 };
+
+/*
+ * Global TSS for 64-bit mode
+ * In long mode, we only need one TSS for all tasks.
+ * It's used only for:
+ * - RSP0: kernel stack pointer (updated on task switch)
+ * - IST: interrupt stack table entries
+ * - IOPB: I/O permission bitmap
+ * Context switching is done entirely in software via __switch_to
+ */
+struct tss_struct init_tss __attribute__((aligned(16))) = {
+	.reserved0 = 0,
+	.rsp0 = 0,  /* Will be set during sched_init */
+	.rsp1 = 0,
+	.rsp2 = 0,
+	.reserved1 = 0,
+	.ist = {0,},
+	.reserved2 = 0,
+	.reserved3 = 0,
+	.iopb_offset = sizeof(struct tss_struct),  /* No IOPB, point past TSS */
+};
+
+/* __switch_to is implemented in switch.nasm and declared in linux/sched.h */
+
 /*
  *  'math_state_restore()' saves the current math information in the
  * old math state array, and gets the new ones from the current task
+ *
+ * In 64-bit mode, we use fxsave/fxrstor for SSE state (512 bytes)
  */
 void math_state_restore()
 {
 	if (last_task_used_math)
-		__asm__("fnsave %0"::"m" (last_task_used_math->tss.i387));
+		__asm__ volatile("fxsave %0" : "=m" (last_task_used_math->i387));
 	if (current->used_math)
-		__asm__("frstor %0"::"m" (current->tss.i387));
+		__asm__ volatile("fxrstor %0" :: "m" (current->i387));
 	else {
-		__asm__("fninit"::);
+		__asm__ volatile("fninit");
 		current->used_math=1;
 	}
 	last_task_used_math=current;
@@ -233,9 +259,20 @@ void sched_init(void)
 	int i;
 	struct desc_struct * p;
 
-	set_tss_desc(gdt+FIRST_TSS_ENTRY,&(init_task.task.tss));
-	set_ldt_desc(gdt+FIRST_LDT_ENTRY,&(init_task.task.ldt));
-	p = gdt+2+FIRST_TSS_ENTRY;
+	/*
+	 * In 64-bit mode, we use a single global TSS.
+	 * Set rsp0 to the top of init_task's kernel stack.
+	 */
+	init_tss.rsp0 = (unsigned long)&init_task + PAGE_SIZE;
+	
+	/* Set up TSS descriptor in GDT (16 bytes in 64-bit mode) */
+	set_tss_desc(gdt+FIRST_TSS_ENTRY, &init_tss);
+	
+	/* Set up LDT descriptor for init task */
+	set_ldt_desc(gdt+FIRST_LDT_ENTRY, &(init_task.task.ldt));
+	
+	/* Clear remaining GDT entries for other tasks' LDTs */
+	p = gdt+2+FIRST_LDT_ENTRY;
 	for(i=1;i<NR_TASKS;i++) {
 		task[i] = NULL;
 		p->a=p->b=0;
@@ -243,12 +280,21 @@ void sched_init(void)
 		p->a=p->b=0;
 		p++;
 	}
+	
+	/* Load task register with TSS selector */
 	ltr(0);
+	/* Load LDT register with init task's LDT */
 	lldt(0);
-	outb_p(0x36,0x43);		/* binary, mode 3, LSB/MSB, ch 0 */
-	outb_p(LATCH & 0xff , 0x40);	/* LSB */
-	outb(LATCH >> 8 , 0x40);	/* MSB */
+	
+	/* Set up PIT timer for 100 Hz */
+	outb_p(0x36,0x43);
+	outb_p(LATCH & 0xff , 0x40);
+	outb(LATCH >> 8 , 0x40);
+	
+	/* Set up timer interrupt handler */
 	set_intr_gate(0x20,&timer_interrupt);
 	outb(inb_p(0x21)&~0x01,0x21);
+	
+	/* Set up system call interrupt */
 	set_system_gate(0x80,&system_call);
 }

@@ -18,16 +18,17 @@ extern int sys_close(int fd);
  */
 #define MAX_ARG_PAGES 32
 
-#define cp_block(from,to) \
-__asm__("pushl $0x10\n\t" \
-	"pushl $0x17\n\t" \
-	"pop %%es\n\t" \
-	"cld\n\t" \
-	"rep\n\t" \
-	"movsl\n\t" \
-	"pop %%es" \
-	::"c" (BLOCK_SIZE/4),"S" (from),"D" (to) \
-	:"cx","di","si")
+/*
+ * Copy a block of data to user space
+ * In 64-bit mode, we don't use segment overrides the same way.
+ * This simplified version just does a memory copy.
+ */
+static inline void cp_block(const char *from, unsigned long to)
+{
+	int i;
+	for (i = 0; i < BLOCK_SIZE; i++)
+		put_fs_byte(from[i], (char *)(to + i));
+}
 
 /*
  * read_head() reads blocks 1-6 (not 0). Block 0 has already been
@@ -206,7 +207,7 @@ static unsigned long change_ldt(unsigned long text_size,unsigned long * page)
 	set_base(current->ldt[2],data_base);
 	set_limit(current->ldt[2],data_limit);
 /* make sure fs points to the NEW data segment */
-	__asm__("pushl $0x17\n\tpop %%fs"::);
+	__asm__ volatile ("movw $0x23, %%ax\n\tmovw %%ax, %%fs":::"ax");
 	data_base += data_limit;
 	for (i=MAX_ARG_PAGES-1 ; i>=0 ; i--) {
 		data_base -= PAGE_SIZE;
