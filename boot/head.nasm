@@ -8,9 +8,9 @@
 ;   0x00000 - 0x00FFF: Reserved (real mode IVT, BDA)
 ;   0x01000 - 0x01FFF: PML4 (Page Map Level 4)
 ;   0x02000 - 0x02FFF: PDPT (Page Directory Pointer Table)
-;   0x03000 - 0x03FFF: PD (Page Directory)
-;   0x04000 - 0x04FFF: PT (Page Table) - first 2MB
-;   0x05000 - 0x0FFFF: More page tables / stack
+;   0x03000 - 0x03FFF: PD (Page Directory) 
+;   0x04000 - 0x0BFFF: PT0-PT7 (8 Page Tables for 16MB with 4KB pages)
+;   0x0C000 - 0x0FFFF: GDT and other data
 ;   0x10000 - onwards: Kernel code (this file)
 ;
 
@@ -24,12 +24,19 @@ global startup_32, idt, gdt, pg_dir
 extern stack_start
 extern main
 
-; Page table addresses
+; Page table addresses - using 4KB pages
 PML4_ADDR   equ 0x1000
 PDPT_ADDR   equ 0x2000
 PD_ADDR     equ 0x3000
-PT_ADDR     equ 0x4000
-GDT_PHYS    equ 0x5000        ; GDT at fixed physical address
+PT0_ADDR    equ 0x4000          ; PT for 0-2MB
+PT1_ADDR    equ 0x5000          ; PT for 2-4MB
+PT2_ADDR    equ 0x6000          ; PT for 4-6MB
+PT3_ADDR    equ 0x7000          ; PT for 6-8MB
+PT4_ADDR    equ 0x8000          ; PT for 8-10MB
+PT5_ADDR    equ 0x9000          ; PT for 10-12MB
+PT6_ADDR    equ 0xA000          ; PT for 12-14MB
+PT7_ADDR    equ 0xB000          ; PT for 14-16MB
+GDT_PHYS    equ 0xC000          ; GDT at fixed physical address
 
 ; MSR numbers
 MSR_EFER    equ 0xC0000080
@@ -49,7 +56,7 @@ CR4_PAE     equ 0x20        ; Physical Address Extension
 PG_PRESENT  equ 0x01
 PG_WRITE    equ 0x02
 PG_USER     equ 0x04
-PG_PS       equ 0x80        ; Page Size (2MB pages)
+PG_PS       equ 0x80        ; Page Size (2MB pages) - NOT used
 
 startup_32:
     ; Set up 32-bit data segments
@@ -62,15 +69,13 @@ startup_32:
     mov     esp, 0x9F000    ; Temporary stack
     
 continue_boot:
-    ; Clear page table area (0x1000 - 0x6000) 
-    ; Use register-based addressing to avoid NASM's RIP-relative issues
+    ; Clear page table area (0x1000 - 0xD000) = 48KB
     mov     edi, PML4_ADDR
-    mov     ecx, 0x5000 / 4     ; 20KB / 4 = 5120 dwords (includes GDT area)
+    mov     ecx, 0xC000 / 4     ; 48KB / 4 = 12288 dwords
     xor     eax, eax
     rep     stosd
     
-    ; Build GDT at fixed physical address (0x5000) with immediate values
-    ; This ensures no memory access issues during the transition
+    ; Build GDT at fixed physical address (0xC000) with immediate values
     mov     edi, GDT_PHYS
     
     ; Null descriptor (0x00)
@@ -79,14 +84,12 @@ continue_boot:
     mov     [edi + 4], eax
     
     ; 64-bit code segment (0x08): L=1, D=0, P=1, DPL=0
-    ; Descriptor: 0x00AF9A000000FFFF
-    mov     dword [edi + 8], 0x0000FFFF     ; Limit 0xFFFF, Base 0x0000
-    mov     dword [edi + 12], 0x00AF9A00    ; G=1, L=1, D=0, P=1, Type=code
+    mov     dword [edi + 8], 0x0000FFFF
+    mov     dword [edi + 12], 0x00AF9A00
     
     ; 64-bit data segment (0x10): P=1, DPL=0
-    ; Descriptor: 0x00CF92000000FFFF
-    mov     dword [edi + 16], 0x0000FFFF    ; Limit 0xFFFF, Base 0x0000
-    mov     dword [edi + 20], 0x00CF9200    ; G=1, D=1, P=1, Type=data
+    mov     dword [edi + 16], 0x0000FFFF
+    mov     dword [edi + 20], 0x00CF9200
     
     ; 64-bit user code (0x18): L=1, D=0, DPL=3
     mov     dword [edi + 24], 0x0000FFFF
@@ -97,29 +100,43 @@ continue_boot:
     mov     dword [edi + 36], 0x00CFF200
 
     ; Set up PML4[0] -> PDPT
-    ; Use register to hold address since ELF64 NASM uses RIP-relative
     mov     edi, PML4_ADDR
-    mov     eax, PDPT_ADDR | PG_PRESENT | PG_WRITE
+    mov     eax, PDPT_ADDR | PG_PRESENT | PG_WRITE | PG_USER
     mov     [edi], eax
     mov     dword [edi + 4], 0
     
     ; Set up PDPT[0] -> PD
     mov     edi, PDPT_ADDR
-    mov     eax, PD_ADDR | PG_PRESENT | PG_WRITE
+    mov     eax, PD_ADDR | PG_PRESENT | PG_WRITE | PG_USER
     mov     [edi], eax
     mov     dword [edi + 4], 0
 
-    ; Set up PD with 2MB pages (identity map first 16MB)
-    ; This is simpler than 4KB pages and sufficient for early boot
+    ; Set up PD[0-7] -> PT0-PT7 (8 page tables for 16MB)
     mov     edi, PD_ADDR
-    mov     eax, PG_PRESENT | PG_WRITE | PG_PS  ; 2MB page, present, writable
-    mov     ecx, 8              ; 8 entries = 16MB
+    mov     eax, PT0_ADDR | PG_PRESENT | PG_WRITE | PG_USER
+    mov     ecx, 8
 .pd_loop:
     mov     [edi], eax
-    mov     dword [edi + 4], 0  ; High 32 bits = 0
-    add     eax, 0x200000       ; Next 2MB
+    mov     dword [edi + 4], 0
+    add     eax, 0x1000         ; Next page table
     add     edi, 8
-    loop    .pd_loop
+    dec     ecx
+    jnz     .pd_loop
+
+    ; Fill all 8 page tables with 4KB page entries
+    ; PT0: maps 0x000000 - 0x1FFFFF (0-2MB)
+    ; PT1: maps 0x200000 - 0x3FFFFF (2-4MB)
+    ; ... etc
+    mov     edi, PT0_ADDR       ; Start of page tables
+    mov     eax, PG_PRESENT | PG_WRITE | PG_USER  ; First page at 0x0
+    mov     ecx, 8 * 512        ; 8 PTs * 512 entries = 4096 pages
+.pt_loop:
+    mov     [edi], eax
+    mov     dword [edi + 4], 0  ; High 32 bits = 0
+    add     eax, 0x1000         ; Next 4KB page
+    add     edi, 8
+    dec     ecx
+    jnz     .pt_loop
 
     ; Load PML4 address into CR3
     mov     eax, PML4_ADDR

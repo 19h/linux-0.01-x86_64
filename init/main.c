@@ -122,9 +122,12 @@ void main(void)		/* This really IS void, no error here. */
 	sti();
 	early_serial_puts("Initialization complete, entering user mode...\n");
 	move_to_user_mode();
+	early_serial_puts("In user mode, calling fork()...\n");
 	if (!fork()) {		/* we count on this going ok */
+		early_serial_puts("In child process, calling init()...\n");
 		init();
 	}
+	early_serial_puts("In parent (task0), entering pause loop...\n");
 /*
  *   NOTE!!   For any other task 'pause()' would mean we have to get a
  * signal to awaken, but task0 is the sole exception (see 'schedule()')
@@ -153,7 +156,9 @@ void init(void)
 {
 	int i,j;
 
+	early_serial_puts("init: calling setup()...\n");
 	setup();
+	early_serial_puts("init: setup() returned, calling fork()...\n");
 	if (!fork())
 		_exit(execve("/bin/update",NULL,NULL));
 	(void) open("/dev/tty0",O_RDWR,0);
