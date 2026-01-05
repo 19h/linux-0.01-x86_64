@@ -8,22 +8,47 @@ if [ ! -f Image ]; then
     make || exit 1
 fi
 
+PORT=4321
+
+# Kill any existing QEMU on this port
+pkill -f "tcp::$PORT" 2>/dev/null
+sleep 0.5
+
 echo "============================================"
-echo "  Linux 0.01 - 64-bit Port"
+echo "  Linux 0.01 - 64-bit Port"  
 echo "============================================"
-echo ""
-echo "Type 'help' for commands."
-echo "Press Ctrl-A then X to exit QEMU."
 echo ""
 
-# Use expect if available for best experience
+# Start QEMU with serial on TCP port (in background)
+qemu-system-x86_64 \
+    -drive file=Image,format=raw,if=floppy \
+    -display none \
+    -serial tcp::$PORT,server=on,wait=on &
+
+QEMU_PID=$!
+
+# Cleanup on exit
+cleanup() {
+    kill $QEMU_PID 2>/dev/null
+    wait $QEMU_PID 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
+# Give QEMU a moment to start listening
+sleep 0.5
+
+echo "Type 'help' for commands. Press Ctrl-C to exit."
+echo ""
+
+# Connect interactively via nc
+# The expect wrapper ensures proper terminal handling
 if command -v expect &>/dev/null; then
-    expect -c '
+    expect -c "
         set timeout -1
-        spawn qemu-system-x86_64 -drive file=Image,format=raw,if=floppy -nographic
+        spawn nc 127.0.0.1 $PORT
         interact
-    '
+    "
 else
-    # Fallback: direct QEMU (may have input issues on some terminals)
-    exec qemu-system-x86_64 -drive file=Image,format=raw,if=floppy -nographic
+    # Fallback to plain nc
+    nc 127.0.0.1 $PORT
 fi
