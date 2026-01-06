@@ -1,45 +1,32 @@
-#!/bin/bash
-# Run Linux 0.01 64-bit kernel
+#!/usr/bin/expect -f
+# Run Linux 0.01 64-bit kernel interactively
 
-cd "$(dirname "$0")"
+set timeout -1
 
-if [ ! -f Image ]; then
-    echo "Building kernel..."
-    make || exit 1
-fi
+# Change to script directory
+cd [file dirname [info script]]
 
-PORT=4321
-
-# Kill any existing QEMU on this port
-pkill -f "tcp::$PORT" 2>/dev/null
-sleep 0.5
-
-# Start QEMU with serial on TCP port (in background, don't wait)
-qemu-system-x86_64 \
-    -drive file=Image,format=raw,if=floppy \
-    -display none \
-    -serial tcp::$PORT,server=on,wait=on &
-
-QEMU_PID=$!
-
-# Cleanup on exit
-cleanup() {
-    kill $QEMU_PID 2>/dev/null
-    wait $QEMU_PID 2>/dev/null
+# Build if needed
+if {![file exists "Image"]} {
+    puts "Building kernel..."
+    exec make
 }
-trap cleanup EXIT INT TERM
 
-# Wait for QEMU to be ready
-sleep 1
+# Kill any old QEMU
+catch {exec pkill -9 qemu-system-x86}
+after 500
 
-# Use expect for proper interactive terminal handling
-# Convert \n (Enter key) to \r (carriage return) for the serial console
-exec expect -c "
-    set timeout -1
-    spawn nc 127.0.0.1 $PORT
-    interact {
-        \"\\n\" {send \"\\r\"}
-        \"\\r\" {send \"\\r\"}
-        \003 {exit}
-    }
-"
+puts "============================================"
+puts "  Linux 0.01 - 64-bit Port"
+puts "============================================"
+puts ""
+puts "Press Ctrl-] to exit"
+puts ""
+
+# Spawn QEMU directly with serial on stdio
+spawn qemu-system-x86_64 -drive file=Image,format=raw,if=floppy -display none -serial stdio
+
+# Interactive mode - pass all input/output through
+interact {
+    \035 {puts "\nExiting..."; exit}
+}
