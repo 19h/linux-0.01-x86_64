@@ -14,12 +14,7 @@ PORT=4321
 pkill -f "tcp::$PORT" 2>/dev/null
 sleep 0.5
 
-echo "============================================"
-echo "  Linux 0.01 - 64-bit Port"  
-echo "============================================"
-echo ""
-
-# Start QEMU with serial on TCP port (in background)
+# Start QEMU with serial on TCP port (in background, don't wait)
 qemu-system-x86_64 \
     -drive file=Image,format=raw,if=floppy \
     -display none \
@@ -31,21 +26,17 @@ QEMU_PID=$!
 cleanup() {
     kill $QEMU_PID 2>/dev/null
     wait $QEMU_PID 2>/dev/null
-    stty sane 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
-# Give QEMU a moment to start listening
-sleep 0.5
+# Wait for QEMU to be ready
+sleep 1
 
-echo "Type 'help' for commands. Press Ctrl-C to exit."
-echo ""
-
-# Set terminal to raw mode for immediate character transmission
-stty raw -echo 2>/dev/null
-
-# Connect with nc 
-nc 127.0.0.1 $PORT
-
-# Restore terminal
-stty sane 2>/dev/null
+# Use expect for proper interactive terminal handling
+exec expect -c "
+    set timeout -1
+    spawn nc 127.0.0.1 $PORT
+    interact {
+        \003 {exit}
+    }
+"
