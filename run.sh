@@ -33,10 +33,13 @@ trap cleanup EXIT INT TERM
 sleep 1
 
 # Use expect for proper interactive terminal handling
+# Convert \n (Enter key) to \r (carriage return) for the serial console
 exec expect -c "
     set timeout -1
     spawn nc 127.0.0.1 $PORT
     interact {
+        \"\\n\" {send \"\\r\"}
+        \"\\r\" {send \"\\r\"}
         \003 {exit}
     }
 "
